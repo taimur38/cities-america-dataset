@@ -1,0 +1,878 @@
+---
+title: "USA Cities Dataset"
+author: "Taimur Shah"
+output:
+    pdf_document: beamer_presentation
+    html_document: default
+fontsize: 11pt
+
+
+classoption: "aspectratio=169"
+---
+
+```{r, echo=FALSE, message=FALSE, results='hide'}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(fig.width=10, fig.height = 6)
+
+options(knitr.table.format = "latex")
+options(kable_styling_position = "center")
+options(kable_styling_latex_options = "scale_down")
+
+library(tidyverse)
+library(ggthemes)
+library(ggrepel)
+library(readxl)
+library(arrow)
+library(patchwork)
+
+theme_set(theme_few())
+
+mega_dataset <- read_parquet('data/mega_dataset.parquet')
+
+mega_dataset <- mega_dataset |>
+    mutate(
+           short_name = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           short_name = str_extract(short_name, "^[^,]+"),
+           short_name = str_extract(short_name, "^[^-]+"),
+    )
+
+migration_dataset <- read_excel('data/metro-to-metro-2016-2020.xlsx', sheet='Sheet2')
+# I can ask if people from your city are moving to less expensive cities
+
+top_cities_2020 <- mega_dataset |>
+    filter(year == 2020) |>
+    arrange(desc(implied_population)) |>
+    head(50) |>
+    pull(GeoFIPS)
+
+top_cities_2010 <- mega_dataset |>
+    filter(year == 2010) |>
+    arrange(desc(implied_population)) |>
+    head(100) |>
+    pull(GeoFIPS)
+
+changes_df <- mega_dataset |>
+    filter(year %in% c(2010, 2020)) |>
+    select(
+           GeoFIPS,
+           GeoName,
+           year, 
+            `Real per capita personal income (constant (2017) dollars) 2/`, 
+            implied_population,
+    ) |>
+    rename(
+            real_pc_income = `Real per capita personal income (constant (2017) dollars) 2/`,
+            pop = implied_population,
+    ) |>
+    pivot_longer(c(-year, -GeoFIPS, -GeoName)) |>
+    pivot_wider(names_from=year, values_from=value) |>
+    mutate(
+            cagr = ((`2020` / `2010`)^(1/10) - 1)
+    ) |>
+    select(-`2010`, -`2020`) |>
+    pivot_wider(names_from=name, values_from=cagr) 
+
+mean_pop_cagr <- median(changes_df$pop, na.rm=T)
+mean_income_cagr <- median(changes_df$real_pc_income, na.rm=T)
+
+income_growth_vs_netmigrants <- mega_dataset |>
+    #filter(grepl(cname, GeoName, ignore.case = T)) |>
+    filter(year %in% c(2010, 2020)) |>
+    select(
+           GeoFIPS,
+           GeoName,
+           year, 
+            `Real per capita personal income (constant (2017) dollars) 2/`
+    ) |>
+    rename(
+            real_pc_income = `Real per capita personal income (constant (2017) dollars) 2/`,
+    ) |>
+    pivot_longer(c(-year, -GeoFIPS, -GeoName)) |>
+    pivot_wider(names_from=year, values_from=value) |>
+    mutate(
+            cagr = ((`2020` / `2010`)^(1/10) - 1)
+    ) |>
+    select(-`2010`, -`2020`) |>
+    pivot_wider(names_from=name, values_from=cagr) |>
+    left_join(mega_dataset |> 
+              filter(year == 2010) |>
+              select(GeoFIPS, GeoName, short_name, net_migrants_2010s, implied_population) ,
+          by=c('GeoFIPS', 'GeoName')
+    ) |>
+    mutate(
+           migrant_rate = net_migrants_2010s / implied_population,
+    ) 
+
+avg_migrant_rate = median(income_growth_vs_netmigrants$migrant_rate, na.rm=T)
+avg_income_growth = median(income_growth_vs_netmigrants$real_pc_income, na.rm=T)
+    
+
+
+```
+
+---
+
+```{r}
+
+# FINAL!
+
+mega_dataset |>
+    group_by(GeoFIPS) |>
+    mutate(
+           real_wage = `Real per capita personal income (constant (2017) dollars) 2/`,
+               #A_MEDIAN / (`RPPs: All items` / 100),
+           migrant_rate = net_migrants_2010s / implied_population[year == 2010],
+    ) |>
+    ungroup() |>
+    filter(year == 2020) |>
+    arrange(desc(implied_population)) |>
+    #head(50) |>
+    mutate(
+           GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           # take only the first name of the city before the ,
+           GeoName = str_extract(GeoName, "^[^,]+"),
+           # take only the first word before the dash
+           GeoName = str_extract(GeoName, "^[^-]+"),
+    ) |>
+    filter(migrant_rate < 0.4) |>
+    ggplot(aes(y=real_wage, x=migrant_rate, label=GeoName)) +
+    geom_vline(aes(xintercept = median(migrant_rate, na.rm=T)), linetype='dashed') + 
+    geom_hline(aes(yintercept = median(real_wage, na.rm=T)), linetype='dashed') + 
+    geom_point(alpha = 0.5) +
+    geom_point(data = . %>% filter(GeoFIPS %in% top_cities_2020), color='red') +
+    geom_label_repel( data = . %>% filter(GeoFIPS %in% top_cities_2020)) +
+    scale_y_continuous(labels = scales::dollar_format()) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    labs(
+         title = "Real Wage vs Net Migration Rate",
+         subtitle = "2010-2020 all MSAs in USA",
+         x = "Net Migration Rate (net migration 2010-2020 / population 2010)",
+         y = "PPP Adjusted Wage in 2020 (2017 dollars)",
+    )
+
+ggsave('imgs/real_wage_vs_migration_4.png', width=12, height=12)
+
+```
+
+---
+
+```{r}
+
+# gen_city_chart <- function(cname) {
+#     mega_dataset |>
+#         filter(grepl(cname, GeoName, ignore.case = T)) |>
+#         select(year, 
+#                `Real personal income (millions of constant (2017) dollars)`, 
+#                `Real per capita personal income (constant (2017) dollars) 2/`, 
+#                `RPPs: All items`, 
+#                `RPPs: Services: Housing`, 
+#                A_MEDIAN, 
+#                implied_population
+#         ) |>
+#         pivot_longer(-year) |>
+#         ggplot(aes(x=year, y=value)) +
+#         geom_line() +
+#         geom_point() + 
+#         facet_wrap(~name, scales="free_y") +
+#         labs(
+#              title = paste0(cname, ": Statistics")
+#         )
+# 
+#     ggsave(paste0("imgs/", cname, "_stats.png"), width=10, height=6)
+# 
+# }
+# 
+# 
+# gen_city_chart('Orlando')
+# gen_city_chart('Houston')
+# 
+# gen_city_chart('Boston')
+# 
+# gen_city_chart('Los Angeles')
+# 
+# gen_city_chart('New York')
+# 
+# gen_city_chart('Miami')
+
+
+# lets do a metric that is 
+# change in real per capita income 
+# change in population 
+# from 2010-2020
+
+```
+
+---
+
+```{r}
+
+
+# FINAL!
+income_growth_vs_netmigrants |>
+    mutate(
+           GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           GeoName = str_extract(GeoName, "^[^,]+"),
+           GeoName = str_extract(GeoName, "^[^-]+"),
+    ) |>
+    filter(migrant_rate < 0.4) |>
+    ggplot(aes(x=migrant_rate, y=real_pc_income, label=GeoName)) +
+    geom_hline(yintercept = avg_income_growth, linetype='dashed') +
+    geom_vline(xintercept = avg_migrant_rate, linetype='dashed') +
+    geom_point(alpha = 0.5) +
+    geom_point(data = . %>% filter(GeoFIPS %in% top_cities_2020), color='red') +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% top_cities_2020)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Real per capita income CAGR (2010-2020)",
+         title = "Changes in Real Income vs Net Migration",
+    ) 
+
+ggsave('imgs/changes_real_income_vs_net_migration_biglabel.png', width=12, height=12)
+
+```
+
+---
+
+
+```{r}
+
+# TODO: What was this supposed to be?
+gen_changes_chart <- function(cname) {
+
+    mega_dataset |>
+        filter(grepl(cname, GeoName, ignore.case = T)) |>
+        filter(year %in% c(2010, 2020)) |>
+        select(year, 
+               `Real per capita personal income (constant (2017) dollars) 2/`, 
+               implied_population,
+        ) |>
+        rename(
+               real_pc_income = `Real per capita personal income (constant (2017) dollars) 2/`,
+               pop = implied_population,
+        ) |>
+        pivot_longer(-year) |>
+        pivot_wider(names_from=year, values_from=value) |>
+        mutate(
+               cagr = ((`2020` / `2010`)^(1/10) - 1)
+        ) 
+}
+
+# for testing
+#cname <- "San Jose"
+cname <- "Dearborn"
+gen_city_patches(cname)
+
+gen_city_patches <- function(cname) {
+
+    full_name <- mega_dataset |>
+        filter(grepl(cname, GeoName, ignore.case = T)) |>
+        select(GeoName) |>
+        first() |>
+        pull()
+
+    scatter1 <- mega_dataset |>
+        group_by(GeoFIPS) |>
+        mutate(
+            real_wage = `Real per capita personal income (constant (2017) dollars) 2/`,
+                #A_MEDIAN / (`RPPs: All items` / 100),
+            migrant_rate = net_migrants_2010s / implied_population[year == 2010],
+            pop_cagr_2010 = (implied_population / implied_population[year == 2010])^(1/10) - 1,
+        ) |>
+        ungroup() |>
+        filter(year == 2020) |>
+        arrange(desc(implied_population)) |>
+        #head(50) |>
+        filter(migrant_rate < 0.4) |>
+        ggplot(aes(y=real_wage, x=migrant_rate, label=short_name)) +
+        geom_vline(aes(xintercept = median(migrant_rate, na.rm=T)), linetype='dashed') + 
+        geom_hline(aes(yintercept = median(real_wage, na.rm=T)), linetype='dashed') + 
+        geom_point(alpha = 0.5) +
+        geom_point(data = . %>% filter(grepl(cname, GeoName, ignore.case = T)), color='red', size=3) + 
+        # geom_label_repel(data = . %>% filter(grepl(cname, GeoName, ignore.case = T))) +
+        scale_y_continuous(labels = scales::dollar_format()) +
+        scale_x_continuous(labels = scales::percent_format()) +
+        labs(
+            title = "Real Wage vs Net Migration Rate",
+            subtitle = "2010-2020",
+            x = "Net Migration Rate",
+            y = "Real Wage",
+        )
+
+    scatter2 <- income_growth_vs_netmigrants |>
+        filter(migrant_rate < 0.4) |>
+        ggplot(aes(x=migrant_rate, y=real_pc_income, label=short_name)) +
+        geom_hline(yintercept = avg_income_growth, linetype='dashed') +
+        geom_vline(xintercept = avg_migrant_rate, linetype='dashed') +
+        geom_point(alpha = 0.5) +
+        geom_point(data = . %>% filter(grepl(cname, GeoName, ignore.case = T)), color='red', size=3) +
+        scale_x_continuous(labels = scales::percent_format()) +
+        scale_y_continuous(labels = scales::percent_format()) +
+        labs(
+            x = "Net Migration Rate (2010-2020)",
+            y = "Real Wage CAGR",
+            title = "Changes in Real Income vs Net Migration",
+            subtitle = "2010-2020",
+        ) 
+
+        # first lets plot the implied_population
+        # we keep a v-line for covid in 2019
+        pop_chart <- mega_dataset |>
+            filter(grepl(cname, GeoName, ignore.case = T)) |>
+            select(year, 
+                implied_population
+            ) |>
+            ggplot(aes(x=year, y=implied_population)) +
+            geom_line() +
+            geom_point() + 
+            geom_vline(xintercept = 2020, linetype='dashed') +
+            scale_y_log10(labels = scales::comma_format()) +
+            labs(
+                title = "Population",
+                x = "Year",
+                y = ""
+            )
+
+
+        pop_growths_df <- mega_dataset |>
+            group_by(GeoFIPS, GeoName) |>
+            arrange(year) |>
+            mutate(
+                pop_growth = (implied_population - lag(implied_population)) / lag(implied_population),
+            ) |>
+            ungroup() |>
+            group_by(year) |>
+            mutate(
+                mdn_pop_growth = median(pop_growth, na.rm=T),
+            ) |>
+            ungroup() 
+
+        yrange <- pop_growths_df |>
+            group_by(year) |>
+            summarise(
+                      tenth = quantile(pop_growth, 0.01, na.rm=T),
+                      nintyeth = quantile(pop_growth, 0.99, na.rm=T),
+            ) |>
+            summarise(
+                      mt = min(tenth, na.rm=T),
+                      mn = max(nintyeth, na.rm=T),
+            ) |>
+            pull(mt, mn)
+
+
+        ann_pop_growths <- pop_growths_df |>
+            ggplot(aes(x=year, y=pop_growth)) +
+            geom_hline(yintercept = 0, linetype='dashed') +
+            # geom_line(aes(y=mdn_pop_growth), color='red', linetype='dashed') +
+            # geom_point(aes(y=mdn_pop_growth), color='red') +
+            geom_boxplot(aes(group=year), outlier.shape = NA) +
+            geom_line(data = . %>% filter(grepl(cname, GeoName, ignore.case = T)) ) +
+            geom_point(data = . %>% filter(grepl(cname, GeoName, ignore.case = T)) ) +
+            scale_y_continuous(
+                               labels = scales::percent_format(),
+                               limits = quantile(pop_growths_df$pop_growth, c(0.001, 0.999), na.rm=T),
+            ) +
+            labs(
+                title = "YoY Population Growth vs Median MSA",
+                x = "Year",
+                y = ""
+            )
+
+    # then we look at real per-capita income 
+    income_chart <- mega_dataset |>
+        filter(grepl(cname, GeoName, ignore.case = T)) |>
+        select(year, 
+               `Real per capita personal income (constant (2017) dollars) 2/`, 
+        ) |>
+        ggplot(aes(x=year, y=`Real per capita personal income (constant (2017) dollars) 2/`)) +
+        geom_line() +
+        geom_point() + 
+        geom_vline(xintercept = 2020, linetype='dashed') +
+        scale_y_continuous(labels = scales::dollar_format()) +
+        labs(
+             title = "Real Per Capita Income",
+             x = "Year",
+             y = ""
+        )
+
+        # do a YoY Per Capita Income Chart 
+
+        inc_growths_df <- mega_dataset |>
+            group_by(GeoFIPS, GeoName) |>
+            arrange(year) |>
+            mutate(
+                pop_growth = (implied_population - lag(implied_population)) / lag(implied_population),
+                inc_growth = (`Real per capita personal income (constant (2017) dollars) 2/` - lag(`Real per capita personal income (constant (2017) dollars) 2/`)) / lag(`Real per capita personal income (constant (2017) dollars) 2/`),
+            ) |>
+            ungroup() |>
+            group_by(year) |>
+            mutate(
+                mdn_pop_growth = median(pop_growth, na.rm=T),
+                mdn_inc_growth = median(inc_growth, na.rm=T),
+            ) |>
+            ungroup() 
+
+    yoy_pcinc_chart <- inc_growths_df |>
+        ggplot(aes(x=year, y=inc_growth)) +
+        geom_hline(yintercept = 0, linetype='dashed') +
+        # geom_line(aes(y=mdn_inc_growth), color='red', linetype='dashed') 
+        geom_boxplot(aes(group=year), outlier.shape = NA) +
+        geom_line(data = . %>% filter(grepl(cname, GeoName, ignore.case = T)) ) +
+        geom_point(data = . %>% filter(grepl(cname, GeoName, ignore.case = T)) ) +
+        scale_y_continuous(
+                           labels = scales::percent_format(),
+                           limits = quantile(inc_growths_df$inc_growth, c(0.001, 0.999), na.rm=T),
+        ) +
+        labs(
+            title = "YoY Real Per Capita Income Growth vs Median MSA",
+            x = "Year",
+            y = ""
+        )
+
+
+        total_income_chart <- mega_dataset |>
+        filter(grepl(cname, GeoName, ignore.case = T)) |>
+        select(year, 
+               `Real personal income (millions of constant (2017) dollars)`, 
+        ) |>
+        ggplot(aes(x=year, y=`Real personal income (millions of constant (2017) dollars)`)) +
+        geom_line() +
+        geom_point() +
+        geom_vline(xintercept = 2020, linetype='dashed') +
+        scale_y_continuous(labels = scales::dollar_format()) +
+        labs(
+             title = "Total Real Income",
+             x = "Year",
+             y = ""
+        )
+
+    wage_dist_chart <- mega_dataset |>
+        filter(grepl(cname, GeoName, ignore.case = T)) |>
+        select(year, 
+               A_MEDIAN, A_PCT10, A_PCT25, A_PCT75, A_PCT90
+        ) |>
+        ggplot(aes(x=year)) +
+        geom_segment(aes(x=year, xend=year, y=A_PCT10, yend=A_PCT90)) +
+        #geom_linerange(aes(ymin=A_PCT25, ymax=A_PCT75)) +
+        geom_rect(aes(ymin=A_PCT25, ymax=A_PCT75, xmin=year-0.25, xmax=year+0.25), fill='white', color='black') +
+        #geom_point(aes(y=A_MEDIAN)) +
+        geom_segment(aes(x=year-0.25, xend=year+0.25, y=A_MEDIAN, yend=A_MEDIAN)) +
+        scale_y_continuous(labels = scales::dollar_format()) +
+        labs(
+             title = "Wage Distribution",
+             x = "Year",
+             y = ""
+        )
+
+    # lets plot the RPPs
+    rpp_overall <- mega_dataset |>
+        filter(grepl(cname, GeoName, ignore.case = T)) |>
+        select(year, 
+               `RPPs: All items`
+        ) |>
+        ggplot(aes(x=year, y=`RPPs: All items`)) +
+        geom_line() +
+        geom_point() + 
+        geom_vline(xintercept = 2020, linetype='dashed') +
+        labs(
+             title = "RPPs: All Items",
+             x = "Year",
+             y = ""
+        )
+
+        # now RPPs for Housing
+
+    rpp_housing <- mega_dataset |>
+        filter(grepl(cname, GeoName, ignore.case = T)) |>
+        select(year, 
+               `RPPs: Services: Housing`
+        ) |>
+        ggplot(aes(x=year, y=`RPPs: Services: Housing`)) +
+        geom_line() +
+        geom_point() + 
+        geom_vline(xintercept = 2020, linetype='dashed') +
+        labs(
+             title = "RPPs: Housing",
+             x = "Year",
+             y = ""
+        )
+
+    # what's a chart that would show whether population is responding to housing? you could show the growth of population vs the previous year
+    # against the RPPs for housing
+
+    pop_growth_yearly <- mega_dataset |>
+        filter(grepl(cname, GeoName, ignore.case = T)) |>
+        arrange(year) |>
+        mutate(
+               pop_growth = (implied_population - lag(implied_population)) / lag(implied_population),
+        ) |>
+        ggplot(aes(x=`RPPs: Services: Housing`, y=pop_growth)) +
+        geom_hline(yintercept = 0, linetype='dashed') +
+        geom_path(arrow=arrow(length=unit(0.2, "inches"), type="closed", ends="last")) +
+        geom_point(aes(label=year)) +
+        scale_y_continuous(labels = scales::percent_format()) +
+        labs(
+             title = "Population Growth vs Cost of Living",
+             y = "Change in Population",
+             x = "Cost of Housing, relative to National Average",
+        )
+
+    # lets do pop_growth_yearly and the bottom 10pct income as 
+    pop_growth_bottom <- mega_dataset |>
+        filter(grepl(cname, GeoName, ignore.case = T)) |>
+        arrange(year) |>
+        mutate(
+               pop_growth = (implied_population - lag(implied_population)) / lag(implied_population),
+               real_pct10 = A_PCT10 / (`RPPs: All items` / 100),
+        ) |>
+        ggplot(aes(x=real_pct10, y=pop_growth)) +
+        geom_hline(yintercept = 0, linetype='dashed') +
+        geom_path(arrow=arrow(length=unit(0.2, "inches"), type="closed", ends="last")) +
+        geom_point(aes(label=year)) +
+        scale_y_continuous(labels = scales::percent_format()) +
+        labs(
+             title = "Population Growth vs Wages of Bottom 10%",
+             y = "Change in Population",
+             x = "Real Income of 10th Percentile of Residents",
+        )
+
+
+    # put them together in patchwork and return
+    # lay out as a grid
+    p <- scatter1 + scatter2 +
+        pop_chart + ann_pop_growths +
+        #total_income_chart + 
+        income_chart + yoy_pcinc_chart +
+        wage_dist_chart + rpp_housing +
+        #yoy_pcinc_chart + wage_dist_chart +
+        #rpp_overall + 
+        #pop_growth_yearly + pop_growth_bottom +
+        plot_layout(
+            ncol = 2,
+            guides = "collect",
+        ) +
+        plot_annotation(
+            title = paste0(full_name, ": Summary Statistics"),
+            caption = "Source: BEA, OES, US Census"
+        )
+
+    p
+    ggsave(paste0("imgs/", cname, "_summary.png"), width=12, height=12)
+
+    p
+}
+
+# add growth breaks using ppopulation / per capita in come
+# add in more relative charts.
+# so we can show population growth yoy as well as the median population growth / the national population growth..
+# similarly wage growth for each pctile relative to national level
+# RPPs are already relative to national level, but should we think more about peers
+# add the two scatters from before, but only highlighting the city in question.
+# CBP data.. what can we do with this.
+
+```
+
+```{r fig.width=12, fig.height=12}
+
+gen_city_patches("San Jose")
+
+```
+
+---
+
+```{r fig.width=12, fig.height=12}
+gen_city_patches("Austin")
+
+```
+
+---
+
+
+```{r fig.width=12, fig.height=12}
+
+gen_city_patches("Orlando")
+gen_city_patches("San Antonio")
+gen_city_patches("Memphis")
+gen_city_patches("Chicago")
+gen_city_patches("Riverside")
+
+gen_city_patches("Buffalo")
+gen_city_patches("Boston")
+gen_city_patches("Los Angeles")
+gen_city_patches("New York")
+gen_city_patches("Miami")
+gen_city_patches("Baltimore")
+
+gen_city_patches('Albuquerque')
+gen_city_patches('Santa Fe')
+
+gen_city_patches('Dearborn')
+
+# we could set up peer cities by using the MSA to MSA migration patterns!
+# 
+
+```
+
+---
+
+```{r}
+
+# kishan request 
+# 1. a scatter plot where we have 
+# - changes in nominal wages on the y axis and 
+# - net migration/population change on the x axis
+
+kishan_one <- mega_dataset |>
+    mutate(
+           nominal_pc_income = `Real per capita personal income (constant (2017) dollars) 2/` * (`RPPs: All items` / 100),
+    ) |>
+    group_by(GeoFIPS) |>
+    mutate(
+           net_migrant_rate = net_migrants_2010s / implied_population[year == 2010],
+    ) |>
+    ungroup() |>
+    filter(year %in% c(2010, 2020)) |>
+    select(
+           GeoFIPS,
+           GeoName,
+           year, 
+           nominal_pc_income, 
+           net_migrants_2010s,
+           net_migrant_rate
+    ) |>
+    pivot_wider(names_from=year, values_from=nominal_pc_income) |>
+    mutate(
+           nominal_cagr = ((`2020` / `2010`)^(1/10) - 1)
+    ) |>
+    select(-`2010`, -`2020`) 
+
+avg_nom_cagr = median(kishan_one$nominal_cagr, na.rm=T)
+avg_net_migrants = median(kishan_one$net_migrants_2010s, na.rm=T)
+avg_net_migrant_rate = median(kishan_one$net_migrant_rate, na.rm=T)
+
+kishan_one |>
+    filter(net_migrant_rate < 0.4) |>
+    mutate(
+           GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           GeoName = str_extract(GeoName, "^[^,]+"),
+           GeoName = str_extract(GeoName, "^[^-]+"),
+    ) |>
+    ggplot(aes(x=net_migrant_rate, y=nominal_cagr, label=GeoName)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
+    geom_point( alpha = 0.5 ) +
+    geom_point(data = . %>% filter(GeoFIPS %in% top_cities_2020), color='red') +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% top_cities_2020)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Nominal per capita income CAGR (2010-2020)",
+         title = "Changes in Nominal Income vs Net Migration Rate",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+
+ggsave('imgs/kishan-one.png', width=10, height=10)
+
+```
+
+---
+
+
+```{r}
+
+# 2. 
+# - changes in housing prices on the y axis
+# - net migration/population change on the x-axis 
+
+kishan_two <- mega_dataset |>
+    group_by(GeoFIPS) |>
+    mutate(
+           net_migrant_rate = net_migrants_2010s / implied_population[year == 2010],
+    ) |>
+    ungroup() |>
+    filter(year %in% c(2010, 2020)) |>
+    select(
+           GeoFIPS,
+           GeoName,
+           year, 
+           `RPPs: Services: Housing`,
+           net_migrants_2010s,
+           net_migrant_rate
+    ) |>
+    pivot_wider(names_from=year, values_from=`RPPs: Services: Housing`) |>
+    mutate(
+           housing_cagr = ((`2020` / `2010`)^(1/10) - 1)
+    ) |>
+    select(-`2010`, -`2020`) 
+
+avg_housing_change = median(kishan_two$housing_cagr, na.rm=T)
+
+kishan_two |>
+    filter(net_migrant_rate < 0.4) |>
+    mutate(
+           GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           GeoName = str_extract(GeoName, "^[^,]+"),
+           GeoName = str_extract(GeoName, "^[^-]+"),
+    ) |>
+    ggplot(aes(x=net_migrant_rate, y=housing_cagr, label=GeoName)) +
+    geom_hline(yintercept = avg_housing_change, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
+    geom_point( alpha = 0.5 ) +
+    geom_point(data = . %>% filter(GeoFIPS %in% top_cities_2020), color='red') +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% top_cities_2020)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Relative Housing Price CAGR (2010-2020)",
+         title = "Changes in Housing Prices vs Net Migration Rate",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+
+ggsave('imgs/kishan-two.png', width=10, height=10)
+
+
+```
+
+---
+
+```{r}
+
+avg_rpps <- mega_dataset |>
+    filter(year >= 2016 & year <= 2020) |>
+    select(GeoFIPS, GeoName, year, `RPPs: All items`, `RPPs: Services: Housing`, `Real per capita personal income (constant (2017) dollars) 2/`) |>
+    group_by(GeoFIPS, GeoName) |>
+    summarise(
+              avg_rpp = mean(`RPPs: All items`, na.rm=T),
+              avg_housing_rpp = mean(`RPPs: Services: Housing`, na.rm=T),
+              avg_pcinc = mean(`Real per capita personal income (constant (2017) dollars) 2/`, na.rm=T),
+    )
+
+# options for ind are c('rpp', 'housing', 'pcinc')
+gen_outmigration_profile <- function(cname, ind='rpp') {
+
+    # what is the profile of in-migration people vs outmigration people, based on RPPs
+
+    # we also have real income per capita
+    full_name <- mega_dataset |>
+        filter(grepl(cname, GeoName, ignore.case = T)) |>
+        select(GeoName) |>
+        first() |>
+        pull()
+
+    indicator <- paste0('dest_rel_', ind)
+
+    origin_code <- mega_dataset |>
+        filter(grepl(cname, GeoName, ignore.case = T)) |>
+        select(GeoFIPS) |>
+        first() |>
+        pull(GeoFIPS) 
+
+    origin_rpps <- avg_rpps |>
+        filter(GeoFIPS == origin_code) |>
+        select(avg_rpp, avg_housing_rpp, avg_pcinc) 
+
+    migration_dataset |>
+        filter(curr_metro_code == origin_code) |>
+        arrange(desc(Estimate))
+
+    destination_profile <- migration_dataset |>
+        filter(prev_metro_code == origin_code) |>
+        left_join(avg_rpps, by=c('curr_metro_code'='GeoFIPS')) |>
+        rename(
+            dest_avg_rpp = avg_rpp,
+            dest_avg_housing_rpp = avg_housing_rpp,
+            dest_pcinc = avg_pcinc,
+        ) |>
+        mutate(
+            dest_rel_rpp = dest_avg_rpp - origin_rpps$avg_rpp,
+            dest_rel_housing = dest_avg_housing_rpp - origin_rpps$avg_housing_rpp,
+            dest_rel_pcinc = dest_pcinc - origin_rpps$avg_pcinc,
+        )
+        # positive is more expensive. negative is cheaper. 
+
+        # width of box is the share of estimate
+        # height of box is dest_rel_rpp or dest_rel_housing
+    p <- destination_profile |>
+        filter(!is.na(GeoName)) |>
+        #arrange((dest_rel_rpp)) |>
+        arrange(!!sym(indicator)) |>
+        mutate(
+            est_share = Estimate / sum(Estimate, na.rm=T),
+            position = cumsum(est_share) - est_share,
+            GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+            GeoName = str_extract(GeoName, "^[^,]+"),
+            GeoName = str_extract(GeoName, "^[^-]+"),
+        ) |>
+        #ggplot(aes(x=dest_rel_rpp, y=position)) +
+        ggplot(aes(x=!!sym(indicator), xmax=!!sym(indicator), y=position)) +
+        geom_rect(aes(ymin=position, ymax=position + est_share,
+                    xmin=0, ),
+                color='gray'
+        ) +
+        geom_text(data = . %>% filter(est_share > 0.01), 
+                aes(
+                    x = 0, #dest_rel_rpp,
+                    y = position + est_share / 2,
+                    label=GeoName,
+                    hjust = ifelse(!!sym(indicator) > 0, 'right', 'left')
+                ),
+        ) +
+        labs(
+            #title = paste0("Relative Cost of Living: People Leaving ", cname),
+             title = paste0("Outmigration profile ", full_name, ": Comparing ", ind),
+            subtitle = "Avg 2016-2020",
+            x = paste("Percentage Point Difference in", ind),  #Cost of Living",
+            y = "Share of Out-Migrants"
+        )
+
+    p
+
+    ggsave(paste0("imgs/", cname, "_outmigration_profile_", ind, ".png"), width=10, height=12)
+
+    p
+
+}
+
+gen_outmigration_profile('San Jose')
+
+
+```
+
+---
+
+```{r}
+
+gen_outmigration_profile('Austin')
+
+```
+
+---
+
+```{r}
+
+gen_outmigration_profile('Orlando')
+
+gen_outmigration_profile('Memphis')
+
+gen_outmigration_profile('Boston')
+
+gen_outmigration_profile('New York')
+
+gen_outmigration_profile('Memphis', 'housing')
+gen_outmigration_profile('Memphis', 'pcinc')
+
+gen_outmigration_profile('Baltimore', 'pcinc')
+gen_outmigration_profile('Baltimore', 'housing')
+gen_outmigration_profile('Baltimore', 'rpp')
+
+gen_outmigration_profile('Dearborn', 'housing')
+
+```
+
+
+
