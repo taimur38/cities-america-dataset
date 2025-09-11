@@ -29,16 +29,23 @@ library(patchwork)
 
 theme_set(theme_few())
 
-mega_dataset <- read_parquet('data/mega_dataset.parquet')
+mega_dataset <- read_parquet('data/mega_dataset2.parquet')
 
 mega_dataset <- mega_dataset |>
     mutate(
            short_name = str_remove(GeoName, "(Metropolitan Statistical Area)"),
            short_name = str_extract(short_name, "^[^,]+"),
            short_name = str_extract(short_name, "^[^-]+"),
+
+           real_mean_wage = mean_wage / (`RPPs: All items` / 100),
+
+           real_mean_wage_housing = mean_wage / (`RPPs: Services: Housing` / 100),
     )
 
+acs <- open_dataset('data/shared-data/ipums/acs-cities.parquet')
+
 migration_dataset <- read_excel('data/metro-to-metro-2016-2020.xlsx', sheet='Sheet2')
+migration_2010_dataset <- read_excel('data/metro-to-metro-2010-2014.xlsx', sheet='Sheet2')
 # I can ask if people from your city are moving to less expensive cities
 
 top_cities_2020 <- mega_dataset |>
@@ -84,11 +91,15 @@ income_growth_vs_netmigrants <- mega_dataset |>
            GeoFIPS,
            GeoName,
            year, 
-            `Real per capita personal income (constant (2017) dollars) 2/`
+            #`Real per capita personal income (constant (2017) dollars) 2/`
+           `RPPs: All items`,
+           mean_wage
     ) |>
-    rename(
-            real_pc_income = `Real per capita personal income (constant (2017) dollars) 2/`,
+    mutate(
+           # real_pc_income = `Real per capita personal income (constant (2017) dollars) 2/`,
+           real_pc_income = mean_wage / (`RPPs: All items` / 100),
     ) |>
+    select(-`RPPs: All items`, -mean_wage) |>
     pivot_longer(c(-year, -GeoFIPS, -GeoName)) |>
     pivot_wider(names_from=year, values_from=value) |>
     mutate(
@@ -108,8 +119,6 @@ income_growth_vs_netmigrants <- mega_dataset |>
 avg_migrant_rate = median(income_growth_vs_netmigrants$migrant_rate, na.rm=T)
 avg_income_growth = median(income_growth_vs_netmigrants$real_pc_income, na.rm=T)
     
-
-
 ```
 
 ---
@@ -263,7 +272,7 @@ gen_changes_chart <- function(cname) {
 
 # for testing
 #cname <- "San Jose"
-cname <- "Dearborn"
+cname <- "San Antonio"
 gen_city_patches(cname)
 
 gen_city_patches <- function(cname) {
@@ -279,6 +288,7 @@ gen_city_patches <- function(cname) {
         mutate(
             real_wage = `Real per capita personal income (constant (2017) dollars) 2/`,
                 #A_MEDIAN / (`RPPs: All items` / 100),
+            real_mean_wage = mean_wage / (`RPPs: All items` / 100),
             migrant_rate = net_migrants_2010s / implied_population[year == 2010],
             pop_cagr_2010 = (implied_population / implied_population[year == 2010])^(1/10) - 1,
         ) |>
@@ -287,9 +297,9 @@ gen_city_patches <- function(cname) {
         arrange(desc(implied_population)) |>
         #head(50) |>
         filter(migrant_rate < 0.4) |>
-        ggplot(aes(y=real_wage, x=migrant_rate, label=short_name)) +
+        ggplot(aes(y=real_mean_wage, x=migrant_rate, label=short_name)) +
         geom_vline(aes(xintercept = median(migrant_rate, na.rm=T)), linetype='dashed') + 
-        geom_hline(aes(yintercept = median(real_wage, na.rm=T)), linetype='dashed') + 
+        geom_hline(aes(yintercept = median(real_mean_wage, na.rm=T)), linetype='dashed') + 
         geom_point(alpha = 0.5) +
         geom_point(data = . %>% filter(grepl(cname, GeoName, ignore.case = T)), color='red', size=3) + 
         # geom_label_repel(data = . %>% filter(grepl(cname, GeoName, ignore.case = T))) +
@@ -302,19 +312,19 @@ gen_city_patches <- function(cname) {
             y = "Real Wage",
         )
 
-    scatter2 <- income_growth_vs_netmigrants |>
-        filter(migrant_rate < 0.4) |>
-        ggplot(aes(x=migrant_rate, y=real_pc_income, label=short_name)) +
-        geom_hline(yintercept = avg_income_growth, linetype='dashed') +
-        geom_vline(xintercept = avg_migrant_rate, linetype='dashed') +
+    scatter2 <- kishan_one |>
+        filter(net_migrant_rate < 0.4) |>
+        ggplot(aes(x=net_migrant_rate, y=nominal_cagr, label=short_name)) +
+        geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+        geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
         geom_point(alpha = 0.5) +
         geom_point(data = . %>% filter(grepl(cname, GeoName, ignore.case = T)), color='red', size=3) +
         scale_x_continuous(labels = scales::percent_format()) +
         scale_y_continuous(labels = scales::percent_format()) +
         labs(
             x = "Net Migration Rate (2010-2020)",
-            y = "Real Wage CAGR",
-            title = "Changes in Real Income vs Net Migration",
+            y = "Average Wage Nominal CAGR",
+            title = "Changes in Nominal Income vs Net Migration",
             subtitle = "2010-2020",
         ) 
 
@@ -343,7 +353,7 @@ gen_city_patches <- function(cname) {
             mutate(
                 pop_growth = (implied_population - lag(implied_population)) / lag(implied_population),
             ) |>
-            ungroup() |>
+ungroup() |>
             group_by(year) |>
             mutate(
                 mdn_pop_growth = median(pop_growth, na.rm=T),
@@ -384,16 +394,14 @@ gen_city_patches <- function(cname) {
     # then we look at real per-capita income 
     income_chart <- mega_dataset |>
         filter(grepl(cname, GeoName, ignore.case = T)) |>
-        select(year, 
-               `Real per capita personal income (constant (2017) dollars) 2/`, 
-        ) |>
-        ggplot(aes(x=year, y=`Real per capita personal income (constant (2017) dollars) 2/`)) +
+        select(year, real_mean_wage) |>
+        ggplot(aes(x=year, y=real_mean_wage)) +
         geom_line() +
         geom_point() + 
         geom_vline(xintercept = 2020, linetype='dashed') +
         scale_y_continuous(labels = scales::dollar_format()) +
         labs(
-             title = "Real Per Capita Income",
+             title = "Real Average Wage",
              x = "Year",
              y = ""
         )
@@ -405,7 +413,10 @@ gen_city_patches <- function(cname) {
             arrange(year) |>
             mutate(
                 pop_growth = (implied_population - lag(implied_population)) / lag(implied_population),
-                inc_growth = (`Real per capita personal income (constant (2017) dollars) 2/` - lag(`Real per capita personal income (constant (2017) dollars) 2/`)) / lag(`Real per capita personal income (constant (2017) dollars) 2/`),
+                #inc_growth = (`Real per capita personal income (constant (2017) dollars) 2/` - lag(`Real per capita personal income (constant (2017) dollars) 2/`)) / lag(`Real per capita personal income (constant (2017) dollars) 2/`),
+                inc_growth = (real_mean_wage - lag(real_mean_wage)) / lag(real_mean_wage),
+
+                nom_inc_growth = (mean_wage - lag(mean_wage)) / lag(mean_wage),
             ) |>
             ungroup() |>
             group_by(year) |>
@@ -427,7 +438,24 @@ gen_city_patches <- function(cname) {
                            limits = quantile(inc_growths_df$inc_growth, c(0.001, 0.999), na.rm=T),
         ) +
         labs(
-            title = "YoY Real Per Capita Income Growth vs Median MSA",
+            title = "YoY Real Average Wage Growth vs Median MSA",
+            x = "Year",
+            y = ""
+        )
+
+    yoy_nom_wage_chart <- inc_growths_df |>
+        ggplot(aes(x=year, y=nom_inc_growth)) +
+        geom_hline(yintercept = 0, linetype='dashed') +
+        # geom_line(aes(y=mdn_inc_growth), color='red', linetype='dashed') 
+        geom_boxplot(aes(group=year), outlier.shape = NA) +
+        geom_line(data = . %>% filter(grepl(cname, GeoName, ignore.case = T)) ) +
+        geom_point(data = . %>% filter(grepl(cname, GeoName, ignore.case = T)) ) +
+        scale_y_continuous(
+                           labels = scales::percent_format(),
+                           limits = quantile(inc_growths_df$nom_inc_growth, c(0.001, 0.999), na.rm=T),
+        ) +
+        labs(
+            title = "YoY Nominal Average Wage Growth vs Median MSA",
             x = "Year",
             y = ""
         )
@@ -451,15 +479,13 @@ gen_city_patches <- function(cname) {
 
     wage_dist_chart <- mega_dataset |>
         filter(grepl(cname, GeoName, ignore.case = T)) |>
-        select(year, 
-               A_MEDIAN, A_PCT10, A_PCT25, A_PCT75, A_PCT90
-        ) |>
+        select(year, median_wage, wage_10th, wage_25th, wage_75th, wage_90th) |>
         ggplot(aes(x=year)) +
-        geom_segment(aes(x=year, xend=year, y=A_PCT10, yend=A_PCT90)) +
+        geom_segment(aes(x=year, xend=year, y=wage_10th, yend=wage_90th)) +
         #geom_linerange(aes(ymin=A_PCT25, ymax=A_PCT75)) +
-        geom_rect(aes(ymin=A_PCT25, ymax=A_PCT75, xmin=year-0.25, xmax=year+0.25), fill='white', color='black') +
+        geom_rect(aes(ymin=wage_25th, ymax=wage_75th, xmin=year-0.25, xmax=year+0.25), fill='white', color='black') +
         #geom_point(aes(y=A_MEDIAN)) +
-        geom_segment(aes(x=year-0.25, xend=year+0.25, y=A_MEDIAN, yend=A_MEDIAN)) +
+        geom_segment(aes(x=year-0.25, xend=year+0.25, y=median_wage, yend=median_wage)) +
         scale_y_continuous(labels = scales::dollar_format()) +
         labs(
              title = "Wage Distribution",
@@ -526,7 +552,7 @@ gen_city_patches <- function(cname) {
         arrange(year) |>
         mutate(
                pop_growth = (implied_population - lag(implied_population)) / lag(implied_population),
-               real_pct10 = A_PCT10 / (`RPPs: All items` / 100),
+               real_pct10 = wage_10th / (`RPPs: All items` / 100),
         ) |>
         ggplot(aes(x=real_pct10, y=pop_growth)) +
         geom_hline(yintercept = 0, linetype='dashed') +
@@ -545,7 +571,8 @@ gen_city_patches <- function(cname) {
     p <- scatter1 + scatter2 +
         pop_chart + ann_pop_growths +
         #total_income_chart + 
-        income_chart + yoy_pcinc_chart +
+        income_chart + yoy_nom_wage_chart +
+        #yoy_pcinc_chart +
         wage_dist_chart + rpp_housing +
         #yoy_pcinc_chart + wage_dist_chart +
         #rpp_overall + 
@@ -579,6 +606,10 @@ gen_city_patches <- function(cname) {
 
 gen_city_patches("San Jose")
 
+gen_city_patches("Cleveland-Elyria")
+
+gen_city_patches("San Francisco")
+
 ```
 
 ---
@@ -592,6 +623,8 @@ gen_city_patches("Austin")
 
 
 ```{r fig.width=12, fig.height=12}
+
+gen_city_patches("Cleveland")
 
 gen_city_patches("Orlando")
 gen_city_patches("San Antonio")
@@ -625,29 +658,41 @@ gen_city_patches('Dearborn')
 # - changes in nominal wages on the y axis and 
 # - net migration/population change on the x axis
 
+mega_dataset |>
+    filter(grepl("Cheyenne", GeoName, ignore.case = T))  |>
+    filter(year %in% c(2010, 2020)) 
+
+
 kishan_one <- mega_dataset |>
     mutate(
-           nominal_pc_income = `Real per capita personal income (constant (2017) dollars) 2/` * (`RPPs: All items` / 100),
+           #nominal_pc_income = `Real per capita personal income (constant (2017) dollars) 2/` * (`RPPs: All items` / 100),
+           nominal_pc_income = mean_wage,
+
     ) |>
     group_by(GeoFIPS) |>
     mutate(
            net_migrant_rate = net_migrants_2010s / implied_population[year == 2010],
+
+           population_cagr = (implied_population[year == 2020] / implied_population[year == 2010])^(1/10) - 1,
     ) |>
     ungroup() |>
     filter(year %in% c(2010, 2020)) |>
     select(
            GeoFIPS,
            GeoName,
+           short_name,
            year, 
            nominal_pc_income, 
            net_migrants_2010s,
-           net_migrant_rate
+           net_migrant_rate,
+           population_cagr
     ) |>
     pivot_wider(names_from=year, values_from=nominal_pc_income) |>
     mutate(
            nominal_cagr = ((`2020` / `2010`)^(1/10) - 1)
     ) |>
     select(-`2010`, -`2020`) 
+
 
 avg_nom_cagr = median(kishan_one$nominal_cagr, na.rm=T)
 avg_net_migrants = median(kishan_one$net_migrants_2010s, na.rm=T)
@@ -670,7 +715,7 @@ kishan_one |>
     scale_y_continuous(labels = scales::percent_format()) +
     labs(
          x = "Net Migration Rate (2010-2020)",
-         y = "Nominal per capita income CAGR (2010-2020)",
+         y = "Mean Wage CAGR (2010-2020)",
          title = "Changes in Nominal Income vs Net Migration Rate",
          caption = "Source: BEA, University of Wisconsin-Madison, 2024"
     )
@@ -678,6 +723,129 @@ kishan_one |>
 ggsave('imgs/kishan-one.png', width=10, height=10)
 
 ```
+
+---
+
+```{r}
+
+premium_one <- mega_dataset |>
+    mutate(
+           #nominal_pc_income = `Real per capita personal income (constant (2017) dollars) 2/` * (`RPPs: All items` / 100),
+           nominal_pc_income = wage_premium
+    ) |>
+    group_by(GeoFIPS) |>
+    mutate(
+           net_migrant_rate = net_migrants_2010s / implied_population[year == 2010],
+    ) |>
+    ungroup() |>
+    filter(year %in% c(2010, 2020)) |>
+    select(
+           GeoFIPS,
+           GeoName,
+           short_name,
+           year, 
+           nominal_pc_income, 
+           net_migrants_2010s,
+           net_migrant_rate
+    ) |>
+    pivot_wider(names_from=year, values_from=nominal_pc_income) |>
+    mutate(
+           nominal_cagr = ((`2020` / `2010`)^(1/10) - 1)
+    ) |>
+    select(-`2010`, -`2020`) 
+
+prem_avg_nom_cagr = median(premium_one$nominal_cagr, na.rm=T)
+prem_avg_net_migrants = median(premium_one$net_migrants_2010s, na.rm=T)
+prem_avg_net_migrant_rate = median(premium_one$net_migrant_rate, na.rm=T)
+
+premium_one |>
+    filter(net_migrant_rate < 0.4) |>
+    mutate(
+           GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           GeoName = str_extract(GeoName, "^[^,]+"),
+           GeoName = str_extract(GeoName, "^[^-]+"),
+    ) |>
+    ggplot(aes(x=net_migrant_rate, y=nominal_cagr, label=GeoName)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
+    geom_point( alpha = 0.5 ) +
+    geom_point(data = . %>% filter(GeoFIPS %in% top_cities_2020), color='red') +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% top_cities_2020)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Relative Wage Premium CAGR (2010-2020)",
+         title = "Changes in the Wage Premium vs Net Migration Rate",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+
+
+ggsave('imgs/premium_one.png', width=10, height=10)
+
+
+
+```
+
+
+```{r}
+
+premium_one |>
+    filter(net_migrant_rate < 0.4) |>
+    mutate(
+           GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           GeoName = str_extract(GeoName, "^[^,]+"),
+           GeoName = str_extract(GeoName, "^[^-]+"),
+    ) |>
+    ggplot(aes(x=net_migrant_rate, y=nominal_cagr, label=GeoName)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
+    geom_point( alpha = 0.5 ) +
+    geom_point(data = . %>% filter(GeoFIPS %in% top_cities_2020), color='red') +
+    #geom_label_repel(data = . %>% filter(GeoFIPS %in% top_cities_2020)) +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% case_studies_df$GeoFIPS)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Relative Wage Premium CAGR (2010-2020)",
+         title = "Changes in the Wage Premium vs Net Migration Rate",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+
+```
+
+
+---
+
+```{r}
+
+premium_one |>
+    filter(net_migrant_rate < 0.4) |>
+    mutate(
+           GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           GeoName = str_extract(GeoName, "^[^,]+"),
+           GeoName = str_extract(GeoName, "^[^-]+"),
+    ) |>
+    ggplot(aes(x=net_migrant_rate, y=nominal_cagr, label=GeoName)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
+    geom_point( alpha = 0.5 ) +
+geom_point(data = . %>% filter(GeoFIPS %in% top_cities_2020), color='red') +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% case_studies_df$GeoFIPS)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Relative Wage Premium CAGR (2010-2020)",
+         title = "Changes in the Wage Premium vs Net Migration Rate",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+
+
+```
+
+
 
 ---
 
@@ -742,14 +910,103 @@ ggsave('imgs/kishan-two.png', width=10, height=10)
 
 ```{r}
 
+
+# HERE:
+# ignore: philadelphia, san francisco, new york, miami, seattle, dallas
+# might be able to do something with la, detroit, chicago
+
+# the problem with wages
+mega_dataset |>
+    filter(GeoFIPS %in% top_cities_2020) |>
+    ggplot(aes(x=year, y=A_MEDIAN, color=short_name)) +
+    geom_line() +
+    geom_text_repel(data = . %>% filter(year == 2016), aes(label=short_name)) +
+    theme(legend.position = 'none') 
+
+ggsave('imgs/wage_issue.png', width=12, height=6)
+
+```
+
+---
+
+```{r}
+
+case_studies <- c("Memphis", "Austin", "San Antonio", "San Jose", "Cheyenne", "Casper")
+
+mega_dataset |>
+    filter(grepl("Cheyenne", GeoName, ignore.case = T)) |>
+    select(GeoFIPS, GeoName, short_name)
+
+
+case_studies_df <- mega_dataset |>
+    filter(grepl(paste(case_studies, collapse='|'), GeoName, ignore.case = T)) |>
+    select(GeoFIPS, GeoName, short_name) |>
+    unique()
+
+kishan_one |>
+    filter(grepl("Casper", GeoName, ignore.case = T)) 
+
+kishan_one |>
+    filter(net_migrant_rate < 0.4) |>
+    ggplot(aes(x=net_migrant_rate, y=nominal_cagr, label=short_name)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
+    geom_point( alpha = 0.5 ) +
+    geom_point(data = . %>% filter(GeoFIPS %in% case_studies_df$GeoFIPS), color='red', size=2) +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% case_studies_df$GeoFIPS)) +
+    scale_y_continuous(labels = scales::percent) +
+    scale_x_continuous(labels = scales::percent) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Mean Wage CAGR (2010-2020)",
+         title = "Changes in Nominal Income vs Net Migration Rate (2010-2020)",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+    
+ggsave('imgs/kishan-one-case-studies.png', width=9, height=6)
+
+
+```
+
+---
+
+```{r}
+
+kishan_one |>
+    filter(net_migrant_rate < 0.4) |>
+    ggplot(aes(x=net_migrant_rate, y=nominal_cagr, label=short_name)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
+    geom_point( alpha = 0.15 ) +
+    #geom_point(data = . %>% filter(GeoFIPS %in% case_studies_df$GeoFIPS), color='red', size=2) +
+    #geom_label_repel(data = . %>% filter(GeoFIPS %in% case_studies_df$GeoFIPS)) +
+    scale_y_continuous(labels = scales::percent) +
+    scale_x_continuous(labels = scales::percent) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Mean Wage CAGR (2010-2020)",
+         title = "Changes in Nominal Income vs Net Migration Rate (2010-2020)",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+
+ggsave('imgs/kishan-one-bg.png', width=9, height=6)
+
+```
+
+
+---
+
+```{r}
+
 avg_rpps <- mega_dataset |>
     filter(year >= 2016 & year <= 2020) |>
-    select(GeoFIPS, GeoName, year, `RPPs: All items`, `RPPs: Services: Housing`, `Real per capita personal income (constant (2017) dollars) 2/`) |>
+    select(GeoFIPS, GeoName, year, `RPPs: All items`, `RPPs: Services: Housing`, `Real per capita personal income (constant (2017) dollars) 2/`, mean_wage) |>
     group_by(GeoFIPS, GeoName) |>
     summarise(
               avg_rpp = mean(`RPPs: All items`, na.rm=T),
               avg_housing_rpp = mean(`RPPs: Services: Housing`, na.rm=T),
-              avg_pcinc = mean(`Real per capita personal income (constant (2017) dollars) 2/`, na.rm=T),
+              #avg_pcinc = mean(`Real per capita personal income (constant (2017) dollars) 2/`, na.rm=T),
+              avg_pcinc = mean(mean_wage / (`RPPs: All items` / 100), na.rm=T),
     )
 
 # options for ind are c('rpp', 'housing', 'pcinc')
@@ -838,7 +1095,101 @@ gen_outmigration_profile <- function(cname, ind='rpp') {
 
 }
 
+migration_dataset
+
+cname <- "San Antonio"
+
+gen_inmigration_profile <- function(cname, ind='rpp') {
+
+    # what is the profile of in-migration people vs outmigration people, based on RPPs
+
+    # we also have real income per capita
+    full_name <- mega_dataset |>
+        filter(grepl(cname, GeoName, ignore.case = T)) |>
+        select(GeoName) |>
+        first() |>
+        pull()
+
+    indicator <- paste0('dest_rel_', ind)
+
+    origin_code <- mega_dataset |>
+        filter(grepl(cname, GeoName, ignore.case = T)) |>
+        select(GeoFIPS) |>
+        first() |>
+        pull(GeoFIPS) 
+
+    origin_rpps <- avg_rpps |>
+        filter(GeoFIPS == origin_code) |>
+        select(avg_rpp, avg_housing_rpp, avg_pcinc) 
+
+    migration_dataset |>
+        filter(curr_metro_code == origin_code) |>
+        arrange(desc(Estimate))
+
+    destination_profile <- migration_dataset |>
+        filter(curr_metro_code == origin_code) |>
+        left_join(avg_rpps, by=c('prev_metro_code'='GeoFIPS')) |>
+        rename(
+            dest_avg_rpp = avg_rpp,
+            dest_avg_housing_rpp = avg_housing_rpp,
+            dest_pcinc = avg_pcinc,
+        ) |>
+        mutate(
+            dest_rel_rpp = dest_avg_rpp - origin_rpps$avg_rpp,
+            dest_rel_housing = dest_avg_housing_rpp - origin_rpps$avg_housing_rpp,
+            dest_rel_pcinc = dest_pcinc - origin_rpps$avg_pcinc,
+        )
+        # positive is more expensive. negative is cheaper. 
+
+        # width of box is the share of estimate
+        # height of box is dest_rel_rpp or dest_rel_housing
+    p <- destination_profile |>
+        filter(!is.na(GeoName)) |>
+        #arrange((dest_rel_rpp)) |>
+        arrange(!!sym(indicator)) |>
+        mutate(
+            est_share = Estimate / sum(Estimate, na.rm=T),
+            position = cumsum(est_share) - est_share,
+            GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+            GeoName = str_extract(GeoName, "^[^,]+"),
+            GeoName = str_extract(GeoName, "^[^-]+"),
+        ) |>
+        #ggplot(aes(x=dest_rel_rpp, y=position)) +
+        ggplot(aes(x=!!sym(indicator), xmax=!!sym(indicator), y=position)) +
+        geom_rect(aes(ymin=position, ymax=position + est_share,
+                    xmin=0, ),
+                color='gray'
+        ) +
+        geom_text(data = . %>% filter(est_share > 0.01), 
+                aes(
+                    x = 0, #dest_rel_rpp,
+                    y = position + est_share / 2,
+                    label=GeoName,
+                    hjust = ifelse(!!sym(indicator) > 0, 'right', 'left')
+                ),
+        ) +
+        labs(
+            #title = paste0("Relative Cost of Living: People Leaving ", cname),
+             title = paste0("Inmigration profile ", full_name, ": Comparing ", ind),
+            subtitle = "Avg 2016-2020",
+            x = paste("Percentage Point Difference in", ind),  #Cost of Living",
+            y = "Share of In-Migrants"
+        )
+
+    p
+
+    ggsave(paste0("imgs/", cname, "_inmigration_profile_", ind, ".png"), width=10, height=12)
+
+    p
+
+}
+
+gen_inmigration_profile('San Antonio')
+
 gen_outmigration_profile('San Jose')
+#gen_outmigration_profile('Los Angeles')
+gen_outmigration_profile('Los Angeles', 'pcinc')
+gen_outmigration_profile('San Antonio', 'pcinc')
 
 
 ```
@@ -872,7 +1223,2545 @@ gen_outmigration_profile('Baltimore', 'rpp')
 
 gen_outmigration_profile('Dearborn', 'housing')
 
+gen_outmigration_profile('Santa Fe', 'housing')
+gen_outmigration_profile('Albuquerque', 'housing')
+gen_outmigration_profile('Las Cruces', 'housing')
+
 ```
+
+
+---
+
+
+```{r}
+
+# TODO: get wages out of the ACS data 
+# run a mincer regression on wages and take the residual 
+
+# main todo is to redo the median wages data.
+# 
+
+# interested in the ratio between the 75th and 25th percentile versus the median wage per city
+
+mega_dataset |>
+    group_by(GeoFIPS) |>
+    mutate(
+           real_mean_wage = mean_wage / (`RPPs: All items` / 100),
+           real_median_wage = median_wage / (`RPPs: All items` / 100),
+           real_10th_wage = wage_10th / (`RPPs: All items` / 100),
+           real_25th_wage = wage_25th / (`RPPs: All items` / 100),
+           real_75th_wage = wage_75th / (`RPPs: All items` / 100),
+           real_90th_wage = wage_90th / (`RPPs: All items` / 100),
+    ) |>
+    ungroup() |>
+    filter(year == 2023) |>
+    mutate(
+        ratio_75_25 = real_75th_wage / real_25th_wage,
+        ratio_90_10 = real_90th_wage / real_10th_wage,
+    ) |>
+    filter(ratio_75_25 < 5) |>
+    ggplot(aes(x=real_median_wage, y=ratio_75_25, label=short_name)) +
+    geom_point(alpha = 0.4) +
+    geom_point(data = . %>% filter(GeoFIPS %in% top_cities_2020)) +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% top_cities_2020)) 
+
+```
+
+
+---
+
+```{r}
+
+y1 <- 2020
+y2 <- 2023
+
+wage_growth_pctiles <- mega_dataset |>
+    filter(year %in% c(y1, y2)) |>
+    group_by(GeoFIPS, GeoName, short_name) |>
+    summarise(
+              wage_growth_10th = (wage_10th[year == y2] / wage_10th[year == y1])^(1/13) - 1,
+              wage_growth_25th = (wage_25th[year == y2] / wage_25th[year == y1])^(1/13) - 1,
+              wage_growth_75th = (wage_75th[year == y2] / wage_75th[year == y1])^(1/13) - 1,
+              wage_growth_90th = (wage_90th[year == y2] / wage_90th[year == y1])^(1/13) - 1,
+              wage_growth_mean = (mean_wage[year == y2] / mean_wage[year == y1])^(1/13) - 1,
+              wage_growth_median = (median_wage[year == y2] / median_wage[year == y1])^(1/13) - 1,
+    ) 
+
+wage_growth_pctiles |>
+    filter(!is.na(wage_growth_median)) |>
+    filter(GeoFIPS %in% top_cities_2020) |>
+    ggplot(aes(x=wage_growth_10th, y=wage_growth_90th, label=short_name)) +
+    geom_abline() +
+    geom_smooth() +
+    geom_point() +
+    geom_text_repel() 
+
+
+
+mega_dataset |>
+    mutate(
+           real_mean_wage = mean_wage / (`RPPs: All items` / 100),
+           real_median_wage = median_wage / (`RPPs: All items` / 100),
+           real_10th_wage = wage_10th / (`RPPs: All items` / 100),
+           real_25th_wage = wage_25th / (`RPPs: All items` / 100),
+           real_75th_wage = wage_75th / (`RPPs: All items` / 100),
+           real_90th_wage = wage_90th / (`RPPs: All items` / 100),
+
+           ratio_75_25 = real_75th_wage / real_25th_wage,
+           ratio_90_10 = real_90th_wage / real_10th_wage,
+    ) |>
+    filter(GeoFIPS %in% top_cities_2020) |>
+    filter(year %in% c(2010, 2023)) |>
+    select(short_name, year, ratio_75_25) |>
+    pivot_wider(names_from=year, values_from=ratio_75_25) |>
+    ggplot(aes(x=`2010`, y=`2023`, label=short_name)) +
+    geom_abline() +
+    geom_smooth() +
+    geom_point() +
+    geom_text_repel() 
+
+# some hypothesis
+# if the ratio is increasing, the city is becoming more unequal - is it because wage growth of bottom 10% has bene lower or because wage growth at the top end is higher?
+
+```
+
+---
+
+
+```{r}
+
+
+
+names(acs)
+msa_names |>
+    filter(grepl('Memphis', msa_name, ignore.case = T)) 
+
+
+acs_industry_shares <- acs |>
+    group_by(YEAR, INDNAICS) |>
+    mutate(
+           natl_pop = sum(PERWT, na.rm=T),
+           natl_ind_emp = sum(PERWT, na.rm=T),
+    ) |>
+    ungroup() |>
+    group_by(MET2013, YEAR, INDNAICS) |>
+    mutate(
+           city_pop = sum(PERWT, na.rm=T),
+           city_ind_emp = sum(PERWT, na.rm=T),
+
+           city_pop_share = city_pop / natl_pop,
+           city_ind_share = city_ind_emp / natl_ind_emp,
+    ) |>
+    ungroup() 
+
+acs_industry_shares |>
+    filter(MET2013 == 32820) |>
+    collect() |>
+    ggplot(aes(x=YEAR, y=city_ind_share, color=INDNAICS)) +
+    geom_line() +
+    geom_text_repel(data = . %>% filter(YEAR == 2023), aes(label=INDNAICS)) +
+    theme(legend.position = 'none') 
+
+
+```
+
+---
+
+```{r}
+
+# san antonio population in 2010 to 2020
+
+mega_dataset |>
+    filter(short_name == "San Antonio") |>
+    arrange(year) |>
+    mutate(
+           pop_change = (implied_population - lag(implied_population)),
+           pop_growth = (implied_population - lag(implied_population)) / lag(implied_population),
+    ) |>
+    ggplot(aes(x=pop_change, y=`RPPs: All items`)) +
+    geom_path() +
+    geom_label(aes(label=year)) 
+
+```
+
+---
+
+```{r}
+
+mega_dataset |>
+    filter(short_name %in% c("San Antonio", "Austin", "Houston", "Dallas", "Los Angeles", "Phoenix", "Washington")) |>
+    filter(year >= 2010 & year <= 2020) |>
+    group_by(year) |>
+    mutate(
+           pct_sanantonio = `RPPs: All items` / `RPPs: All items`[short_name == "San Antonio"],
+           pct_sanantonio_housing = `RPPs: Services: Housing` / `RPPs: Services: Housing`[short_name == "San Antonio"],
+    ) |>
+    ungroup() |>
+    filter(short_name != "San Antonio") |>
+    ggplot(aes(x=year, y=pct_sanantonio_housing, color=short_name)) +
+    #geom_hline(yintercept = 100, linetype='dashed', color='grey') +
+    geom_line() +
+    #geom_line(data = . %>% filter(short_name == "San Antonio"), size=2) +
+    geom_text_repel(data = . %>% filter(year == 2020), aes(label=short_name)) +
+    theme(legend.position = 'none') +
+    scale_y_continuous(labels = scales::comma, n.breaks=10) +
+    scale_x_continuous(n.breaks = 3) +
+    labs(
+         title = "Housing Costs Relative to San Antonio",
+         x = "Year",
+         y = "Relative Cost of Housing",
+         caption = "Source: BEA"
+    )
+
+ggsave('imgs/sanantonio-housing-costs.png', width=5, height=4)
+
+
+```
+
+
+```{r}
+
+zillow_dat <- read_csv('data/zillow/neighborhood_zhvi_all.csv')
+
+zillow_dat |>
+    filter(grepl("San Antonio", Metro, ignore.case = T))  |>
+    select(-RegionID, -SizeRank, -RegionType, -StateName, -State) |>
+    pivot_longer(-c(RegionName, City, Metro, CountyName)) |>
+    mutate(
+           name = as.Date(name, format="%Y-%m-%d"),
+    ) |>
+    ggplot(aes(x=name, y=value)) +
+    geom_boxplot(aes(group=name), outlier.shape = NA) 
+
+```
+
+---
+
+```{r}
+
+natl_ind_stats <- acs |>
+  mutate(
+    naics_2digit = str_sub(INDNAICS, 1, 2),
+    naics_2_desc = case_when(
+      naics_2digit == '11' ~ 'Agriculture, Forestry, Fishing and Hunting',
+      naics_2digit == '21' ~ 'Mining, Quarrying, and Oil and Gas Extraction',
+      naics_2digit == '22' ~ 'Utilities',
+      naics_2digit == '23' ~ 'Construction',
+      naics_2digit %in% c('31', '32', '33') ~ 'Manufacturing',
+      naics_2digit == '42' ~ 'Wholesale Trade',
+      naics_2digit %in% c('44', '45') ~ 'Retail Trade',
+      naics_2digit %in% c('48', '49') ~ 'Transportation and Warehousing',
+      naics_2digit == '51' ~ 'Information',
+      naics_2digit == '52' ~ 'Finance and Insurance',
+      naics_2digit == '53' ~ 'Real Estate and Rental and Leasing',
+      naics_2digit == '54' ~ 'Professional, Scientific, and Technical Services',
+      naics_2digit == '55' ~ 'Management of Companies and Enterprises',
+      naics_2digit == '56' ~ 'Administrative and Support and Waste Management and Remediation Services',
+      naics_2digit == '61' ~ 'Educational Services',
+      naics_2digit == '62' ~ 'Health Care and Social Assistance',
+      naics_2digit == '71' ~ 'Arts, Entertainment, and Recreation',
+      naics_2digit == '72' ~ 'Accommodation and Food Services',
+      naics_2digit == '81' ~ 'Other Services (except Public Administration)',
+      naics_2digit == '92' ~ 'Public Administration'
+    )
+  ) %>%
+  filter(EMPSTAT == 1) %>%
+  group_by(YEAR, naics_2_desc) |>
+  summarise(
+    natl_ind_emp = sum(PERWT, na.rm=T),
+  ) |>
+  ungroup() |>
+  group_by(YEAR) |>
+  mutate(
+    total_emp = sum(natl_ind_emp)
+  ) |>
+  ungroup() |>
+  mutate(
+    natl_ind_share = natl_ind_emp / total_emp
+  )
+
+acs_short_industry_shares <- acs |>
+  filter(EMPSTAT == 1) |>
+  mutate(
+    naics_2digit = str_sub(INDNAICS, 1, 2),
+    naics_2_desc = case_when(
+      naics_2digit == '11' ~ 'Agriculture, Forestry, Fishing and Hunting',
+      naics_2digit == '21' ~ 'Mining, Quarrying, and Oil and Gas Extraction',
+      naics_2digit == '22' ~ 'Utilities',
+      naics_2digit == '23' ~ 'Construction',
+      naics_2digit %in% c('31', '32', '33') ~ 'Manufacturing',
+      naics_2digit == '42' ~ 'Wholesale Trade',
+      naics_2digit %in% c('44', '45') ~ 'Retail Trade',
+      naics_2digit %in% c('48', '49') ~ 'Transportation and Warehousing',
+      naics_2digit == '51' ~ 'Information',
+      naics_2digit == '52' ~ 'Finance and Insurance',
+      naics_2digit == '53' ~ 'Real Estate and Rental and Leasing',
+      naics_2digit == '54' ~ 'Professional, Scientific, and Technical Services',
+      naics_2digit == '55' ~ 'Management of Companies and Enterprises',
+      naics_2digit == '56' ~ 'Administrative and Support and Waste Management and Remediation Services',
+      naics_2digit == '61' ~ 'Educational Services',
+      naics_2digit == '62' ~ 'Health Care and Social Assistance',
+      naics_2digit == '71' ~ 'Arts, Entertainment, and Recreation',
+      naics_2digit == '72' ~ 'Accommodation and Food Services',
+      naics_2digit == '81' ~ 'Other Services (except Public Administration)',
+      naics_2digit == '92' ~ 'Public Administration'
+    )
+  ) %>%
+  group_by(MET2013, YEAR, naics_2_desc) |>
+  summarise(
+    city_ind_emp = sum(PERWT, na.rm=T)
+  ) |>
+  ungroup() |>
+  group_by(MET2013, YEAR) |>
+  mutate(
+      city_total_emp = sum(city_ind_emp, na.rm=T)
+  ) |>
+  ungroup() |>
+  left_join(natl_ind_stats, by = c("YEAR", "naics_2_desc")) |>
+  mutate(
+    city_ind_share = city_ind_emp / city_total_emp,
+    city_ind_markeshare = city_ind_emp / natl_ind_emp,
+    city_ind_rca = city_ind_share / natl_ind_share
+  )
+
+```
+
+---
+
+```{r}
+
+acs_short_industry_shares |>
+  filter(MET2013 == 41700) |>
+  filter(!is.na(naics_2_desc)) |>
+  collect() |>
+  #filter(city_ind_share > 0.005) |>
+  ggplot(aes(x=YEAR, y=city_ind_emp, color=naics_2_desc)) +
+  geom_line(alpha = 0.5) +
+  geom_line(data = . %>% filter(naics_2_desc == "Manufacturing")) +
+  geom_text_repel(data = . %>%
+                    filter(YEAR == 2022) %>%
+                    filter(city_ind_emp > 40000),
+                  aes(label=naics_2_desc)) +
+  scale_x_continuous(n.breaks = 10) +
+  scale_y_continuous(labels=scales::comma) +
+  theme(legend.position = 'none') +
+  labs(
+    title = "Employment by Sector, San Antonio",
+    y = "Estimated Employment",
+    x = "",
+    caption = "Source: American Community Survey"
+  )
+
+```
+
+---
+
+```{r}
+
+acs_short_industry_shares |>
+  filter(MET2013 == 41700) |>
+  filter(YEAR >= 2010 & YEAR <= 2020) |>
+  filter(!is.na(naics_2_desc)) |>
+  collect() |>
+  group_by(naics_2_desc) |>
+  mutate(
+    emp_2022 = first(city_ind_emp[YEAR == 2022]),
+    emp_2010 = first(city_ind_emp[YEAR == 2010]),
+
+    rca_2010 = first(city_ind_rca[YEAR == 2010]),
+    rca_2022 = first(city_ind_rca[YEAR == 2022]),
+  ) |>
+  ungroup() |>
+  mutate(
+    #naics_2_desc = fct_reorder(naics_2_desc, emp_2010, .desc = TRUE)
+    naics_2_desc = fct_reorder(naics_2_desc, rca_2010, .desc = TRUE)
+  ) |>
+  ggplot(aes(x=YEAR, y=city_ind_rca, color=naics_2_desc)) +
+  geom_hline(yintercept = 1, linetype='dashed', color='grey') +
+  geom_line() +
+  # geom_text_repel(data = . %>%
+  #                   filter(YEAR == 2022),
+  #                 aes(label=naics_2_desc)) +
+  scale_x_continuous(n.breaks = 3) +
+  scale_y_continuous(labels=scales::comma) +
+  theme(legend.position = 'none') +
+  labs(
+    title = "Employment by Sector, San Antonio",
+    y = "Share of National Employment in Sector",
+    x = "",
+    caption = "Source: American Community Survey"
+  ) +
+  # label each facet max length is 25 
+  facet_wrap(~ naics_2_desc, scales = 'free_y', labeller = label_wrap_gen(width = 20))
+
+```
+
+---
+
+```{r}
+
+san_antonio_df <- acs_short_industry_shares |>
+  filter(MET2013 == 41700) |>
+  #filter(YEAR %in%  c(2010, 2020)) |>
+  filter(!is.na(naics_2_desc)) |>
+  collect() |>
+  group_by(naics_2_desc) |>
+  mutate(
+    emp_2020 = first(city_ind_emp[YEAR == 2020]),
+    emp_2010 = first(city_ind_emp[YEAR == 2010]),
+
+    rca_2010 = first(city_ind_rca[YEAR == 2010]),
+    rca_2020 = first(city_ind_rca[YEAR == 2020]),
+
+    marketshare_2010 = first(city_ind_markeshare[YEAR == 2010]),
+    marketshare_2020 = first(city_ind_markeshare[YEAR == 2020]),
+  ) |>
+  ungroup() |> 
+  mutate(
+        # rename Other Services (except Public Administration) to Other Services
+        # rename Administrative and Support and Waste Management and Remediation Services to Support Services
+        naics_2_desc = ifelse(naics_2_desc == "Other Services (except Public Administration)", "Other Services", naics_2_desc),
+        naics_2_desc = ifelse(naics_2_desc == "Administrative and Support and Waste Management and Remediation Services", "Support Services", naics_2_desc),
+    ) |>
+  mutate(
+    #naics_2_desc = fct_reorder(naics_2_desc, emp_2010, .desc = TRUE)
+    naics_2_desc = fct_reorder(naics_2_desc, rca_2010, .desc = TRUE)
+  ) 
+
+mega_dataset |>
+    group_by(year) |>
+    mutate(
+           total_population = sum(implied_population, na.rm=T),
+    ) |>
+    ungroup() |>
+    filter(short_name == "San Antonio") |>
+    filter(year %in% c(2010, 2020)) |>
+    select(year, implied_population, total_population) |>
+    mutate(pop_share = implied_population / total_population) |>
+    mutate(
+           cagr = (implied_population / lead(implied_population))^(1/10) - 1
+    )
+
+
+san_antonio_df |>
+  filter(YEAR %in%  c(2010, 2020)) |>
+  ggplot(aes(label=str_wrap(naics_2_desc, 25), color=naics_2_desc)) +
+  #geom_point(aes(x = emp_2020, y = marketshare_2020)) +
+  geom_hline(yintercept = 0.00819, linetype='dashed', color='grey') +
+  annotate("text", x = 125000, y=0.0085,
+                label = "Share of national population",
+                color = "grey",  hjust = 0, vjust=0) +
+  #geom_hline(yintercept = 0.00897, linetype='dashed', color='grey') +
+  geom_segment(aes(
+                   x = emp_2010, 
+                   y = marketshare_2010, 
+                   xend = emp_2020, 
+                   yend = marketshare_2020),
+               arrow = arrow(type = "closed", length = unit(0.1, "inches")),
+    ) + 
+  geom_point(aes(x = emp_2010, y = marketshare_2010), pch=21, fill='white') +
+  geom_text_repel(data = . %>% filter(YEAR == 2020),
+                  aes(x=(emp_2010 + emp_2020) / 2, 
+                      y=(marketshare_2010 + marketshare_2020) / 2)) +
+  scale_x_continuous(labels=scales::comma) +
+  scale_y_continuous(labels=scales::percent) +
+  theme(legend.position = 'none') +
+  labs(
+       x = "Employment in Sector",
+       y = "Share of National Employment in Sector",
+       caption = "Calculations based on American Community Survey",
+       title = "San Antonio Industry Employment: 2010 to 2020",
+    )
+
+ggsave('imgs/sanantonio-industry-employment.png', width=10, height=6)
+
+```
+
+---
+
+```{r}
+
+# copy this for memphis
+
+memphis_df <- acs_short_industry_shares |>
+    filter(MET2013 == 32820) |>
+  #filter(MET2013 == 41700) |>
+  #filter(YEAR %in%  c(2010, 2020)) |>
+  filter(!is.na(naics_2_desc)) |>
+  collect() |>
+  group_by(naics_2_desc) |>
+  mutate(
+    emp_2020 = first(city_ind_emp[YEAR == 2020]),
+    emp_2010 = first(city_ind_emp[YEAR == 2010]),
+
+    rca_2010 = first(city_ind_rca[YEAR == 2010]),
+    rca_2020 = first(city_ind_rca[YEAR == 2020]),
+
+    marketshare_2010 = first(city_ind_markeshare[YEAR == 2010]),
+    marketshare_2020 = first(city_ind_markeshare[YEAR == 2020]),
+  ) |>
+  ungroup() |> 
+  mutate(
+        # rename Other Services (except Public Administration) to Other Services
+        # rename Administrative and Support and Waste Management and Remediation Services to Support Services
+        naics_2_desc = ifelse(naics_2_desc == "Other Services (except Public Administration)", "Other Services", naics_2_desc),
+        naics_2_desc = ifelse(naics_2_desc == "Administrative and Support and Waste Management and Remediation Services", "Support Services", naics_2_desc),
+    ) |>
+  mutate(
+    #naics_2_desc = fct_reorder(naics_2_desc, emp_2010, .desc = TRUE)
+    naics_2_desc = fct_reorder(naics_2_desc, rca_2010, .desc = TRUE)
+  ) 
+
+memphis_df |>
+  filter(YEAR %in%  c(2010, 2020)) |>
+  ggplot(aes(label=str_wrap(naics_2_desc, 25), color=naics_2_desc)) +
+  #geom_point(aes(x = emp_2020, y = marketshare_2020)) +
+  geom_hline(yintercept = 0.00501, linetype='dashed', color='grey') +
+  annotate("text", x = 65000, y=0.0051,
+                label = "Share of national population",
+                color = "grey",  hjust = 0, vjust=0) +
+  #geom_hline(yintercept = 0.00897, linetype='dashed', color='grey') +
+  geom_segment(aes(
+                   x = emp_2010, 
+                   y = marketshare_2010, 
+                   xend = emp_2020, 
+                   yend = marketshare_2020),
+               arrow = arrow(type = "closed", length = unit(0.1, "inches")),
+    ) + 
+  geom_point(aes(x = emp_2010, y = marketshare_2010), pch=21, fill='white') +
+  geom_text_repel(data = . %>% filter(YEAR == 2020),
+                  aes(x=(emp_2010 + emp_2020) / 2, 
+                      y=(marketshare_2010 + marketshare_2020) / 2)) +
+  scale_x_continuous(labels=scales::comma) +
+  scale_y_continuous(labels=scales::percent) +
+  theme(legend.position = 'none') +
+  labs(
+       x = "Employment in Sector",
+       y = "Share of National Employment in Sector",
+       caption = "Calculations based on American Community Survey",
+       title = "Memphis Industry Employment: 2010 to 2020",
+    )
+
+ggsave('imgs/memphis-industry-employment.png', width=10, height=6)
+
+```
+
+---
+
+```{r}
+
+memphis_df 
+
+memphis_df |>
+  filter(YEAR %in%  c(2010, 2015, 2020)) |>
+  arrange(YEAR) |>
+  ggplot(aes(label=str_wrap(naics_2_desc, 25), color=naics_2_desc)) +
+  #geom_point(aes(x = emp_2020, y = marketshare_2020)) +
+  geom_hline(yintercept = 0.00501, linetype='dashed', color='grey') +
+  annotate("text", x = 65000, y=0.0051,
+                label = "Share of national population",
+                color = "grey",  hjust = 0, vjust=0) +
+  #geom_hline(yintercept = 0.00897, linetype='dashed', color='grey') +
+  geom_path(
+            aes(x=city_ind_emp,
+                y = city_ind_markeshare,
+            ),
+            arrow = arrow(type = "closed", length = unit(0.1, "inches")),
+  ) +
+  #geom_segment(aes(
+  #                 x = emp_2010, 
+  #                 y = marketshare_2010, 
+  #                 xend = emp_2020, 
+  #                 yend = marketshare_2020),
+  #             arrow = arrow(type = "closed", length = unit(0.1, "inches")),
+  #  ) + 
+  geom_point(data = . %>% filter(YEAR != 2020), aes(x = city_ind_emp, y = city_ind_markeshare ), pch=21, fill='white') +
+  geom_text_repel(data = . %>% filter(YEAR == 2020),
+                  aes(x=(emp_2010 + emp_2020) / 2, 
+                      y=(marketshare_2010 + marketshare_2020) / 2)) +
+  scale_x_continuous(labels=scales::comma) +
+  scale_y_continuous(labels=scales::percent) +
+  theme(legend.position = 'none') +
+  labs(
+       x = "Employment in Sector",
+       y = "Share of National Employment in Sector",
+       caption = "Calculations based on American Community Survey",
+       title = "Memphis Industry Employment: 2010 to 2020",
+    )
+
+
+```
+
+---
+
+```{r}
+
+fred_natl_dat <- read_excel('data/FRED topline emps.xlsx', sheet='Monthly')
+
+
+fred_natl_names <- read_excel('data/FRED topline emps.xlsx', sheet='natl-readme-cleaned')
+
+fred_memphis_dat <- read_excel('data/FRED topline emps.xlsx', sheet='memphis dat') 
+
+fred_memphis_names <- read_excel('data/FRED topline emps.xlsx', sheet='memphis-readme-cleaned')
+
+fred_natl_cleaned <- fred_natl_dat |>
+    pivot_longer(-observation_date) |>
+    left_join(fred_natl_names, by=c('name'='Series ID')) |>
+    select(-name) |>
+    mutate(
+           simple_title = str_replace_all(Title, "All Employees,", ""),
+           simple_title = str_trim(simple_title),
+    )
+
+fred_memphis_cleaned <- fred_memphis_dat |>
+    pivot_longer(-observation_date) |>
+    left_join(fred_memphis_names, by=c('name'='Series ID')) |>
+    select(-name) |>
+    mutate(
+           simple_title = str_replace_all(Title, "All Employees:", ""),
+           simple_title = str_replace_all(simple_title, " in .*", ""),
+           simple_title = str_trim(simple_title),
+    )
+
+memphis_titles <- fred_memphis_cleaned |>
+    filter(`Seasonal Adjustment` == "Not Seasonally Adjusted") |>
+    select(Title) |> unique() |>
+    mutate(
+           simple_title = str_replace_all(Title, "All Employees:", ""),
+           simple_title = str_replace_all(simple_title, " in .*", ""),
+           simple_title = str_trim(simple_title),
+    )
+
+natl_titles <- fred_natl_cleaned |>
+    filter(`Seasonal Adjustment` == "Not Seasonally Adjusted") |>
+    select(Title) |> unique() |>
+    mutate(
+           simple_title = str_replace_all(Title, "All Employees,", ""),
+           simple_title = str_trim(simple_title),
+    )
+
+# need a way to map memphis titles to natl titles, with some fuzzy matching, and some that dont need to be matched..
+# for each memphis title, whats the best natl title
+
+memphis_titles |>
+    select(simple_title) |>
+    left_join(natl_titles ) 
+
+natl_titles
+
+fred_memphis_joined <- fred_memphis_cleaned |>
+    filter(`Seasonal Adjustment` == "Not Seasonally Adjusted") |>
+    left_join(fred_natl_cleaned %>%
+              filter(`Seasonal Adjustment` == "Not Seasonally Adjusted"), by=c('observation_date', 'simple_title')) |>
+    select(observation_date, simple_title, value.x, value.y) |>
+    rename(
+           memphis_emps = value.x,
+           natl_emps = value.y
+    )
+
+# total private; mining, logging and construction; government: federal government
+
+```
+
+---
+
+
+```{r}
+
+# just take the average annual employment
+fred_memphis_annual <- fred_memphis_joined |>
+    group_by(year(observation_date), simple_title) |>
+    summarise(
+              memphis_emps = mean(memphis_emps, na.rm=T),
+              natl_emps = mean(natl_emps, na.rm=T),
+    ) |>
+    mutate(
+           market_share = memphis_emps / natl_emps,
+    ) |>
+    rename(
+           year = `year(observation_date)`
+    ) 
+
+fred_memphis_annual |>
+    ggplot(aes(x=year, y=market_share, color=simple_title)) +
+    geom_line() +
+    geom_vline(xintercept = 2008, linetype='dashed', color='grey') +
+    geom_text_repel(data = . %>% filter(year == 2023), aes(label=simple_title)) +
+    scale_y_continuous(labels=scales::percent) +
+    theme(legend.position = 'none') +
+    labs(
+         title = "Memphis Employment Share vs National",
+         x = "Year",
+         y = "Memphis Employment Share",
+         caption = "Source: FRED"
+    )
+
+ggsave('imgs/memphis-fred-employment-share.png', width=10, height=6)
+
+```
+
+---
+
+```{r}
+
+# now lets do the segment graph but with this data
+# y axis is marketshare
+# x axis is employment in memphis
+
+
+fred_memphis_annual |>
+    filter(!(simple_title %in% c("Total Nonfarm", "Total Private"))) |>
+    filter(year %in% c(1990, 2000, 2010, 2020)) |>
+    arrange(year) |>
+    ggplot(aes(x=memphis_emps, y=market_share, label=simple_title, color=simple_title)) +
+    geom_path(
+           arrow = arrow(type = "closed", length = unit(0.1, "inches"))
+    ) +
+    geom_point(data = . %>% filter(year != 2020), pch=21, fill='white') +
+    geom_text_repel(data = . %>% filter(year == 2020)) +
+    theme(legend.position = 'none') 
+
+
+```
+
+
+```{r}
+
+library(fredr)
+
+apikey <- "423518c0b80952381dda1a2367425540"
+
+fredr_set_key(apikey)
+
+fredr_docs()
+
+# source id: 22 for BLS
+fredr::fredr_sources() |>
+    filter(grepl("Labor Statistics", name, ignore.case = T)) 
+
+tmp <- fredr::fredr_releases() |>
+    filter(grepl("bls", link)) 
+
+tmp |> View()
+
+# I want "employment situation" which is id = 50
+
+
+fredr::fredr_release_series(release_id = 50, filter_variable = "units", filter_value = "Thousands of Persons")
+
+fredr::fredr_release(release_id = 308, realtime_start=as.Date("1990-01-01"))
+
+fredr::fredr_category_series(category_id= 11)
+
+fredr::fredr_series_search_text("Current Employment Statistics", filter_variable = "units", filter_value = "Thousands of Persons")
+
+msa_releases2 <- fredr::fredr_release_series(release_id = 113,
+                                             filter_variable = "units",
+                                             filter_value = "Thousands of Persons"
+)
+
+msa_releases2
+
+
+msa_releases <- fredr::fredr_release_series(release_id = 308,
+                                             filter_variable = "units",
+                                             filter_value = "Thousands of Persons",
+)
+
+msa_releases2 <- fredr::fredr_release_series(release_id = 308,
+                                             filter_variable = "units",
+                                             filter_value = "Thousands of Persons",
+                                             offset = 1000
+)
+
+
+natl_titles # construction + mining logging 
+# private educational services
+# health care
+
+# for each simple_title in natl_titles, call fredr_series_search_text with the city name prepended and 
+# collect a table of the results
+# use purrr
+
+msa_releases
+
+cname <- "Memphis"
+get_city_dat <- function(cname) {
+
+    simple_titles <- natl_titles |>
+        pull(simple_title)
+
+    results <- NULL
+
+    i <- 1
+    for(st in simple_titles) {
+        print(st)
+
+        res <- fredr::fredr_series_search_text(
+            paste(cname, st), 
+            filter_variable = "frequency", 
+            filter_value = "Annual"
+        ) 
+
+        print(res)
+
+        print(names(res))
+        # if length of names(res) == 0, then skip
+        if(length(names(res)) == 0) {
+            print(paste("No results for", st))
+            next
+        } else {
+
+            # check if difference in names of res and results
+            names_match <- all(names(res) == names(results))
+            # what is the difference in names
+            if(!names_match) {
+                print(paste("Names do not match for", st))
+                print(setdiff(names(res), names(results)))
+                print(setdiff(names(results), names(res)))
+
+                # unselect the missing names
+                res <- res |>
+                    select(-(setdiff(names(res), names(results))))
+            }
+
+            results <- rbind(results, res)
+        }
+    }
+
+    results 
+
+}
+
+# alternative method: the code pattern apperas to be 
+# SMU|47|MSA-ID|2digitcode|0000000|1A
+# the 2 digits we want are:
+# 00 Total Nonfarm
+# 15 Mining, logging and Construction
+# 30 Manufacturing
+# 40 Trade, Transportation, and Utilities
+# 41 Wholesale Trade
+# 42 Retail Trade
+# 50 Information
+# 55 Financial Activities
+# 60 Professional and Business Services
+# 65 Education and Health Services
+# 70 Leisure and Hospitality
+# 80 Other Services
+# 90 Government
+
+sectors <- tribble(
+                   ~code, ~title,
+                   "00", "Total Nonfarm",
+                   "15", "Mining, Logging and Construction",
+                   "30", "Manufacturing",
+                   "40", "Trade, Transportation, and Utilities",
+                   "41", "Wholesale Trade",
+                   "42", "Retail Trade",
+                   "43", "Transportation and Warehousing",
+                   "50", "Information",
+                   "55", "Financial Activities",
+                   "60", "Professional and Business Services",
+                   "65", "Education and Health Services",
+                   "70", "Leisure and Hospitality",
+                   "80", "Other Services",
+                   "90", "Government"
+                   )
+
+fredr_series_search_text("All Employees: Transportation Current Employment Statistics", filter_variable = "units", filter_value = "Thousands of Persons")
+
+fredr_series_search_text("Memphis Transportation", filter_variable = "units", filter_value = "Thousands of Persons")
+
+
+natl_res <-  NULL
+for(i in 1:nrow(sectors)) {
+    sector <- sectors[i, ]
+    print(sector)
+    code <- sector$code
+    title <- sector$title
+
+
+    res <- fredr::fredr_series_search_text(paste("All Employees:", title, "Current Employment Statistics"), filter_variable = "units", filter_value = "Thousands of Persons")
+    natl_res <- rbind(natl_res, res %>%
+                      head(4))
+}
+
+natl_res |>
+    filter(seasonal_adjustment == "Not Seasonally Adjusted") |>
+    # ignore first 8 rows
+    slice(-c(1:8)) 
+
+
+fredr::fredr_series_search_text(paste("All Employees: Transportation, Warehousing Current Employment Statistics"), filter_variable = "units", filter_value = "Thousands of Persons")
+
+natl_sector_ids <- tribble(
+                           ~series_id, ~title,
+                           "PAYNSA", "Total Nonfarm",
+                           "CEU1000000001", "Mining and Logging",
+                           "CEU2000000001", "Construction", 
+                           "CEU3000000001", "Manufacturing",
+                           "CEU4000000001", "Trade, Transportation, and Utilities", # we split this apart below
+                           "CEU4142000001", "Wholesale Trade",
+                           "CEU4200000001", "Retail Trade",
+                           "CEU4300000001", "Transportation and Warehousing",
+                           "CEU5000000001", "Information",
+                           "CEU5500000001", "Financial Activities",
+                           "CEU6000000001", "Professional and Business Services",
+                           "CEU6500000001", "Education and Health Services", # technicall Private Education and Health Services
+                           "CEU7000000001", "Leisure and Hospitality",
+                           # missing 'Other Services
+                           # need to create this from
+                           "CEU7072200001", "Food Services and Drinking Places",
+                           "TEMPHELPN", "Temporary Help Services",
+                           ## end 
+
+                           "CEU9000000001", "Government", 
+                           "CEU9091000001", "Federal Government",
+                        )
+
+# go through all natl sector ids, grab the data, group them into annual data, combine sectors for services and mining logging and concstruction
+
+# step one get data 
+
+all_natl_results <- NULL
+
+for(i in 1:nrow(natl_sector_ids)) {
+    sector <- natl_sector_ids[i, ]
+    print(sector)
+    code <- sector$series_id
+    title <- sector$title
+    series_id <- code
+
+    res <- fredr::fredr_series_observations(series_id = series_id, observation_start = as.Date("1990-01-01"))
+
+    if(nrow(res) == 0) {
+        print(paste("No data for", title, "with series id", series_id))
+        next
+    }
+
+    res <- res |>
+        mutate(title = title) 
+
+    all_natl_results <- rbind(all_natl_results, res)
+
+}
+
+annual_natl_results <- all_natl_results |>
+    mutate(
+           year = year(date),
+    ) |>
+    group_by(year, title) |>
+    summarise(
+              value = mean(value, na.rm=T)
+    ) 
+
+# we need to create a few combined series
+merged_annual_natl_results <- all_natl_results |>
+    mutate(
+           year = year(date),
+           title = case_when(
+               title == "Mining and Logging" ~ "Mining, Logging and Construction",
+               title == "Construction" ~ "Mining, Logging and Construction",
+               title == "Temporary Help Services" ~ "Other Services",
+               TRUE ~ title
+           )
+    ) |>
+    group_by(year, title) |>
+    summarise(value = mean(value, na.rm=T)) 
+
+
+annual_natl_results |>
+    ggplot(aes(x=year, y=value, color=title)) +
+    geom_line() 
+
+
+# hell yea part 2
+# ok so now we have the national and memphis data, we can compare them
+
+
+fetch_city_dat <- function(msa_id) {
+
+    results <- NULL
+    # loop though rows of sectors
+    for(i in 1:nrow(sectors)) {
+        sector <- sectors[i, ]
+        print(sector)
+        code <- sector$code
+        title <- sector$title
+        series_id <- paste0("SMU47", msa_id, code, "0000000", "1A")
+        print(series_id)
+
+        res <- fredr::fredr_series_observations(series_id = series_id, observation_start = as.Date("1990-01-01"))
+
+        results <- rbind(results, res |> 
+                         mutate(sector = title))
+
+    }
+
+    results
+}
+
+memphis_msa <- "32820"
+
+memphis_dat_test <- fetch_city_dat(memphis_msa)
+
+memphis_dat_test |>
+    select(sector) |> unique()
+
+memphis_dat_test |>
+    filter(sector != "Total Nonfarm") |>
+    ggplot(aes(x=date, y=value, color=sector)) +
+    geom_line() +
+    geom_text_repel(data = . %>% filter(date == max(date)), aes(label=sector)) +
+    theme(legend.position = 'none') +
+    scale_y_continuous(labels=scales::comma) +
+    labs(
+         title = "Memphis Employment by Sector",
+         x = "Year",
+         y = "Employment (Thousands of Persons)",
+         caption = "Source: FRED"
+    )
+
+    # hell yea!!!
+
+## now lets get national data the same way??
+
+sectors
+fred_natl_cleaned 
+natl_titles |>
+    left_join(sectors, by=c("simple_title"="title")) 
+
+sectors |>
+    left_join(natl_titles, by=c("title"="simple_title"))
+
+# lets grab mining logging and construction to combine them into a single category.
+# then we do this for education and health.
+
+fred_natl_cleaned |>
+    filter(grepl("Mining|Logging|Construction", simple_title, ignore.case=T)) |>
+    select(Title, simple_title) |> 
+    unique()
+
+fred_natl_cleaned |>
+
+
+
+
+natl_titles |>
+    head(2) |>
+    pull(simple_title) |>
+    purrr::map(\(title) {
+        fredr::fredr_series_search_text(
+                                        paste("Memphis", title), 
+                                        filter_variable="frequency", 
+                                        filter_value="Annual")
+    }) |>
+
+
+fredr::fredr_series_search_text("Memphis Construction", filter_variable="frequency", filter_value="Annual")
+
+|>
+
+                                ", 
+
+                                natl_titles
+
+msa_releases2 |>
+    filter(grepl("All Employees", title)) |>
+    filter(grepl("Memphis", title)) |>
+    select(id, title, units)
+
+
+
+
+```
+
+
+
+
+
+
+---
+
+```{r}
+
+san_antonio_df |>
+    filter(naics_2_desc == "Mining, Quarrying, and Oil and Gas Extraction") |>
+    ggplot(aes(x=YEAR, y=city_ind_emp)) +
+    geom_line()
+
+```
+
+---
+
+```{r}
+
+
+mega_dataset |>
+    filter(year >= 2010 & year <= 2020) |>
+    ggplot(aes(x=year, y=real_mean_wage)) +
+    geom_boxplot(aes(group=year), outlier.shape = NA) +
+    geom_line(data = . %>% filter(short_name == "San Antonio"), color='red' ) +
+    geom_point(data = . %>% filter(short_name == "San Antonio"), color='red', size=1.5) +
+    scale_y_continuous(labels = scales::dollar_format(scale = 1/1000, suffix = "K"), limits=c(20000, 80000)) +
+    scale_x_continuous(n.breaks = 10) +
+    labs(
+         title = "Real Mean Wage in San Antonio vs Other Cities",
+         x = "Year",
+         y = "Real Mean Wage (2017 Dollars)",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    ) 
+
+ggsave('imgs/sanantonio-real-wages.png', width=9, height=4)
+
+```
+
+---
+
+```{r}
+
+peers <- c("Austin", "Houston", "Dallas", "Los Angeles", "Phoenix", "Washington")
+
+mega_dataset |>
+    filter(year >= 2009 & year <= 2020) |>
+    group_by(GeoFIPS) |>
+    arrange(year) |>
+    mutate(
+           real_wage_growth = (real_mean_wage - lag(real_mean_wage)) / lag(real_mean_wage)
+    ) |>
+    ungroup() |>
+    filter(year > 2009) |>
+    ggplot(aes(x=year, y=real_wage_growth)) +
+    geom_boxplot(aes(group=year), outlier.shape = NA) +
+    geom_line(data = . %>% filter(short_name %in% peers), aes(color=short_name) ) +
+    geom_line(data = . %>% filter(short_name == "San Antonio"), color='red' ) +
+    geom_point(data = . %>% filter(short_name == "San Antonio"), color='red' ) +
+    scale_y_continuous(labels = scales::percent, limits=c(-0.1, 0.1),) +
+    scale_x_continuous(n.breaks = 10) +
+    labs(
+         title = "San Antonio Real Wage Growth vs Other Cities",
+         y = "Real Wage Growth (%)",
+         x = "Year",
+         caption = "Source: Calculations from ACS, BEA"
+    )
+
+ggsave('imgs/sanantonio-real-wage-growth.png', width=9, height=4)
+
+```
+
+---
+
+```{r}
+
+real_wage_growths <- mega_dataset |>
+    filter(year %in% c(2010, 2020)) |>
+    select(GeoFIPS, short_name, real_mean_wage, year) |>
+    pivot_wider(names_from=year, values_from=real_mean_wage) |>
+    mutate(
+           #real_wage_growth = (`2020` - `2010`) / `2010`,
+           real_wage_growth = (`2020` / `2010`)^(1/10) - 1,
+    ) |>
+    filter(!is.na(real_wage_growth)) 
+
+median_wage_growth <- median(real_wage_growths$real_wage_growth, na.rm=T)
+median_big_city_wage_growths <- median((real_wage_growths |> filter(GeoFIPS %in% top_cities_2020))$real_wage_growth, na.rm=T)
+
+sa_wage_growth <- real_wage_growths |>
+    filter(short_name == "San Antonio") |>
+    pull(real_wage_growth)
+
+rwg_df <- tribble(
+                  ~label, ~real_wage_growth,
+                  #"San Antonio", sa_wage_growth,
+                  "Median Top 20 Cities", median_big_city_wage_growths,
+                  "Median All Cities", median_wage_growth
+                  )
+
+real_wage_growths |>
+    select(short_name, real_wage_growth) |>
+    filter(short_name %in% c("San Antonio", "Austin", "Houston", "Dallas", "Los Angeles", "Phoenix", "Washington")) |>
+    rename(label=short_name) |>
+    rbind(rwg_df) |>
+    ggplot(aes(y=real_wage_growth, x=reorder(label, real_wage_growth))) +
+    geom_bar(stat='identity') +
+    geom_bar(stat='identity', data = . %>% filter(label == "San Antonio"), fill='firebrick') +
+    geom_bar(stat='identity', data = . %>% filter(grepl("Median All", label)), fill='steelblue') +
+    geom_bar(stat='identity', data = . %>% filter(grepl("Median Top", label)), fill='steelblue') +
+    scale_y_continuous(labels = scales::percent, n.breaks=10) +
+    labs(
+         title = "Real Wage Growth 2010-2020",
+         y = "",
+         x = "",
+         caption = "Source: Calculations from ACS, BEA"
+    ) 
+
+ggsave('imgs/sanantonio-real-wage-growth-2010-2020.png', width=6, height=4)
+
+
+```
+
+---
+
+```{r}
+
+real_wage_growths <- mega_dataset |>
+    filter(year %in% c(2010, 2020)) |>
+    select(GeoFIPS, short_name, real_mean_wage_housing, year) |>
+    pivot_wider(names_from=year, values_from=real_mean_wage_housing) |>
+    mutate(
+           #real_wage_growth = (`2020` - `2010`) / `2010`,
+           real_wage_growth = (`2020` / `2010`)^(1/10) - 1,
+    ) |>
+    filter(!is.na(real_wage_growth)) 
+
+median_wage_growth <- median(real_wage_growths$real_wage_growth, na.rm=T)
+median_big_city_wage_growths <- median((real_wage_growths |> filter(GeoFIPS %in% top_cities_2020))$real_wage_growth, na.rm=T)
+
+rwg_df <- tribble(
+                  ~label, ~real_wage_growth,
+                  #"San Antonio", sa_wage_growth,
+                  "Median Top 20 Cities", median_big_city_wage_growths,
+                  "Median All Cities", median_wage_growth
+                  )
+
+real_wage_growths |>
+    select(short_name, real_wage_growth) |>
+    #filter(short_name %in% c("San Antonio", "Austin", "Houston", "Dallas", "Los Angeles", "Phoenix", "Washington")) |>
+    filter(short_name %in% c("San Jose", "San Francisco", "Los Angeles", "San Diego")) |>
+    rename(label=short_name) |>
+    rbind(rwg_df) |>
+    ggplot(aes(y=real_wage_growth, x=reorder(label, real_wage_growth))) +
+    geom_bar(stat='identity') +
+    geom_bar(stat='identity', data = . %>% filter(label == "San Jose"), fill='firebrick') +
+    geom_bar(stat='identity', data = . %>% filter(grepl("Median All", label)), fill='steelblue') +
+    geom_bar(stat='identity', data = . %>% filter(grepl("Median Top", label)), fill='steelblue') +
+    scale_y_continuous(labels = scales::percent, n.breaks=10) +
+    labs(
+         title = "Real Wage Growth 2010-2020",
+         y = "",
+         x = "",
+         caption = "Source: Calculations from ACS, BEA"
+    ) 
+
+```
+
+---
+
+```{r}
+
+
+
+```
+
+---
+
+
+```{r}
+
+
+housing_df <- mega_dataset |>
+    filter(year %in% c(2010, 2020)) |>
+    select(GeoFIPS, short_name, `RPPs: Services: Housing`, year) |>
+    pivot_wider(names_from=year, values_from=`RPPs: Services: Housing`) |>
+    mutate(
+           #real_wage_growth = (`2020` - `2010`) / `2010`,
+           housing_change = (`2020` / `2010`)^(1/10) - 1,
+    ) |>
+    filter(!is.na(housing_change)) 
+
+median_housing_change <- median(housing_df$housing_change, na.rm=T)
+median_big_city_housing_change <- median((housing_df |> filter(GeoFIPS %in% top_cities_2020))$housing_change, na.rm=T)
+
+housing_change_df <- tribble(
+                  ~label, ~housing_change,
+                  "Median Top 20 Cities", median_big_city_housing_change,
+                  "Median All Cities", median_housing_change
+                )
+
+housing_df |>
+    select(short_name, housing_change) |>
+    filter(short_name %in% c("San Antonio", "Austin", "Houston", "Dallas", "Los Angeles", "Phoenix", "Washington")) |>
+    rename(label=short_name) |>
+    rbind(tribble(
+                  ~label, ~housing_change,
+                  "Median Top 20 Cities", median_big_city_housing_change,
+                  "Median All Cities", median_housing_change
+    )) |>
+    ggplot(aes(y=housing_change, x=reorder(label, housing_change))) +
+    geom_bar(stat='identity') +
+    geom_bar(stat='identity', data = . %>% filter(label == "San Antonio"), fill='firebrick') +
+    geom_bar(stat='identity', data = . %>% filter(grepl("Median All", label)), fill='steelblue') +
+    geom_bar(stat='identity', data = . %>% filter(grepl("Median Top", label)), fill='steelblue') +
+    scale_y_continuous(labels = scales::percent, n.breaks=10) +
+    labs(
+         title = "Housing Cost Change 2010-2020",
+         y = "",
+         x = "",
+         caption = "Source: Calculations from ACS, BEA"
+    )
+
+```
+
+---
+
+```{r}
+
+mega_dataset |>
+    filter(short_name %in% c("San Antonio", "Austin", "Houston", "Dallas", "Los Angeles", "Phoenix", "Washington")) |>
+    ggplot(aes(x=year, y=`RPPs: Services: Housing`, color=short_name)) +
+    geom_line() +
+    geom_point() 
+
+
+```
+
+---
+
+```{r}
+
+zillow_msa_dat <- read_csv('data/zillow/metro_month.csv') |>
+    filter(RegionType == "msa") |>
+    select(-RegionID, -SizeRank, -RegionType, -StateName) |>
+    pivot_longer(-RegionName, names_to='date', values_to='zhvi') |>
+    mutate(
+           date = as.Date(date, format="%Y-%m-%d"),
+    )
+
+zillow_msa_low <- read_csv('data/zillow/metro_bottom_tier_month.csv') |>
+    filter(RegionType == "msa") |>
+    select(-RegionID, -SizeRank, -RegionType, -StateName) |>
+    pivot_longer(-RegionName, names_to='date', values_to='zhvi') |>
+    mutate(
+           date = as.Date(date, format="%Y-%m-%d"),
+    )
+
+zillow_msa_high <- read_csv('data/zillow/metro_top_tier_month.csv') |>
+    filter(RegionType == "msa") |>
+    select(-RegionID, -SizeRank, -RegionType, -StateName) |>
+    pivot_longer(-RegionName, names_to='date', values_to='zhvi') |>
+    mutate(
+           date = as.Date(date, format="%Y-%m-%d"),
+    )
+
+
+zillow_msa_combined <- zillow_msa_dat |>
+    mutate(kind = "All") |>
+    rbind(zillow_msa_low |>
+          mutate(kind = "Bottom Tier")) |>
+    rbind(zillow_msa_high |>
+          mutate(kind = "Top Tier")) 
+
+zillow_msa_dat |>
+    filter(grepl("San Antonio", RegionName, ignore.case = T)) 
+
+zillow_msa_dat |>
+    filter(month(date) == 1) |>
+    filter(year(date) >= 2010) |>
+    filter(year(date) <= 2020) |>
+    ggplot(aes(x=year(date), y=zhvi)) +
+    geom_boxplot(aes(group=date), outlier.shape = NA) +
+    geom_line(data = . %>% filter(RegionName == "San Antonio, TX"), color='red') +
+    geom_point(data = . %>% filter(RegionName == "San Antonio, TX"), color='red') 
+
+```
+
+---
+
+```{r}
+
+zhvi_changes <- zillow_msa_dat |>
+    filter(month(date) == 1) |>
+    filter(year(date) %in% c(2010, 2020)) |>
+    mutate(year = year(date)) |>
+    select(-date) |>
+    pivot_wider(names_from=year, values_from=zhvi) |>
+    mutate(
+           zhvi_change = (`2020` / `2010`)^(1/10) - 1,
+    ) 
+
+
+zhvi_changes |>
+    ggplot(aes(x=`2010`, y=zhvi_change, label=RegionName)) +
+    geom_point() +
+    geom_point(data = . %>% filter(RegionName == "San Antonio, TX"), color='firebrick', size=2) +
+    geom_hline(yintercept = median(zhvi_changes$zhvi_change, na.rm=T), linetype='dashed', color='steelblue') 
+
+    ggplot(aes(x=zhvi_change, y=reorder(RegionName, zhvi_change))) +
+    geom_bar(stat='identity') +
+    geom_bar(stat='identity', data = . %>% filter(RegionName == "San Antonio, TX"), fill='firebrick') +
+    geom_hline(yintercept = median(zhvi_changes$zhvi_change, na.rm=T), linetype='dashed', color='steelblue') 
+
+
+
+```
+
+```{r}
+
+zhvi_combined_changes <- zillow_msa_combined |>
+    filter(month(date) == 1) |>
+    filter(year(date) %in% c(2010, 2020)) |>
+    mutate(year = year(date)) |>
+    select(-date) |>
+    pivot_wider(names_from=year, values_from=zhvi) |>
+    mutate(
+           zhvi_change = (`2020` / `2010`)^(1/10) - 1,
+    ) 
+
+zhvi_combined_changes |>
+    ggplot(aes(x=`2010`, y=zhvi_change, label=RegionName)) +
+    geom_point(alpha=0.5) +
+    geom_point(data = . %>% filter(RegionName == "San Jose, CA"), color='red', size=2) +
+    geom_hline(data = . %>% 
+               group_by(kind) %>%
+               summarise(median_yintercept = median(zhvi_change, na.rm=T)),
+           aes(yintercept = median_yintercept), 
+           linetype='dashed'
+    ) +
+    geom_vline(data = . %>% 
+               group_by(kind) %>%
+               summarise(median_xintercept = median(`2010`, na.rm=T)),
+           aes(xintercept = median_xintercept), 
+           linetype='dashed'
+    ) +
+    scale_y_continuous(labels = scales::percent, n.breaks=10) +
+    scale_x_continuous(labels = scales::dollar_format(scale = 1/1000, suffix = "K")) +
+    facet_wrap(~kind, scales='free_x') +
+    labs(
+         title = "Change in Home Values across MSAs, 2010-2020",
+         subtitle = "San Jose highlighed",
+         x = "Home Value Index in 2010",
+         y = "Home Value Index  CAGR",
+         caption = "Source: Zillow. Top Tier represents the typical value for homes within the 65th to 95th percentile range\n while Bottom Tier is the typical value for homes within the 5th to 35th percentile range.",
+    )
+
+ggsave('imgs/zhvi-changes-msa.png', width=9, height=4)
+
+```
+
+
+---
+
+```{r}
+
+mig_calcs <- migration_dataset |>
+    mutate(
+           total_migration = sum(Estimate, na.rm=T),
+    ) |>
+    group_by(curr_msa_name) |>
+    mutate(
+              total_inmigrants = sum(Estimate, na.rm=T),
+
+              total_inmigration_share = total_inmigrants / total_migration,
+
+              in_share = Estimate / total_inmigrants,
+    ) |>
+    ungroup() |>
+    group_by(prev_msa_name) |>
+    mutate(
+           total_outmigrants = sum(Estimate, na.rm=T),
+           total_outmigration_share = total_outmigrants / total_migration,
+           out_share = Estimate / total_outmigrants,
+    ) |>
+    ungroup() |>
+    mutate(
+           fair_share_score = out_share / total_inmigration_share,
+    )
+
+mig_calcs_old <- migration_2010_dataset |>
+    mutate(
+           total_migration = sum(Estimate, na.rm=T),
+    ) |>
+    group_by(curr_msa_name) |>
+    mutate(
+              total_inmigrants = sum(Estimate, na.rm=T),
+
+              total_inmigration_share = total_inmigrants / total_migration,
+
+              in_share = Estimate / total_inmigrants,
+    ) |>
+    ungroup() |>
+    group_by(prev_msa_name) |>
+    mutate(
+           total_outmigrants = sum(Estimate, na.rm=T),
+           total_outmigration_share = total_outmigrants / total_migration,
+           out_share = Estimate / total_outmigrants,
+    ) |>
+    ungroup() |>
+    mutate(
+           fair_share_score = out_share / total_inmigration_share,
+    )
+
+mig_calcs_intl <- migration_dataset |>
+    filter(is.na(as.numeric(prev_metro_code))) |>
+    mutate(
+           total_migration = sum(Estimate, na.rm=T),
+    ) |>
+    group_by(curr_msa_name) |>
+    mutate(
+              total_inmigrants = sum(Estimate, na.rm=T),
+
+              total_inmigration_share = total_inmigrants / total_migration,
+
+              in_share = Estimate / total_inmigrants,
+    ) |>
+    ungroup() |>
+    group_by(prev_msa_name) |>
+    mutate(
+           total_outmigrants = sum(Estimate, na.rm=T),
+           total_outmigration_share = total_outmigrants / total_migration,
+           out_share = Estimate / total_outmigrants,
+    ) |>
+    ungroup() |>
+    mutate(
+           fair_share_score = out_share / total_inmigration_share,
+    )
+
+
+
+mig_calcs |>
+    filter(grepl("San Antonio", curr_msa_name, ignore.case = T)) |>
+    arrange(desc(total_outmigration_share)) |>
+    filter(Estimate > 1000) |>
+    ggplot(aes(x=total_outmigrants, y=fair_share_score, label=prev_msa_name)) +
+    geom_point() +
+    geom_text_repel() 
+
+```
+
+
+---
+
+
+```{r}
+
+mig_calcs |>
+    filter(grepl("San Antonio|Dallas|Houston|Austin", curr_msa_name, ignore.case = T)) |>
+    filter(is.na(as.numeric(prev_metro_code))) |>
+    group_by(prev_msa_name) |>
+    summarise(
+              to_texas = sum(Estimate, na.rm=T),
+              total_outmigrants = first(total_outmigrants),
+              share = to_texas / total_outmigrants,
+    ) |>
+    arrange(desc(share))
+
+# texas cities get some 14% of migrants from central america - 40k out of 280k
+# they also got 10% of africa and 7.5% of south america 
+
+mig_calcs |>
+    filter(grepl("San Antonio|Dallas|Houston|Austin", curr_msa_name, ignore.case = T)) |>
+    filter(is.na(as.numeric(prev_metro_code))) |>
+    group_by(prev_msa_name) |>
+    mutate(
+              to_texas = sum(Estimate, na.rm=T),
+              share_texas = to_texas / total_outmigrants,
+    ) |>
+    ungroup() |>
+    mutate(
+           share_texas = Estimate / to_texas
+    ) |>
+    filter(grepl("San Antonio", curr_msa_name, ignore.case = T)) |>
+    ggplot(aes(x=to_texas, y=share_texas, label=prev_msa_name)) +
+    geom_point() +
+    geom_text_repel() 
+
+|>
+    arrange(desc(share))
+
+
+    arrange(desc(total_outmigration_share)) |>
+    filter(Estimate > 1000) |>
+    ggplot(aes(x=total_outmigrants, y=fair_share_score, label=prev_msa_name)) +
+    geom_point() +
+    geom_text_repel() +
+    facet_wrap(~curr_msa_name, scales='free') 
+
+
+```
+
+---
+
+
+```{r}
+
+# compare immigration from central america before to now
+
+mig_calcs_old |>
+    filter(curr_msa_name == "San Antonio-New Braunfels, TX Metro Area") |>
+    filter(prev_msa_name == "Central America") |>
+    mutate(
+           time_label = "2010-2014"
+    ) |>
+    rbind( 
+          mig_calcs |> 
+              filter(curr_msa_name == "San Antonio-New Braunfels, TX Metro Area") |> 
+              filter(prev_msa_name == "Central America") |>
+              mutate(
+                     time_label = "2016-2020"
+              )   
+    ) 
+
+
+    mig_calcs |>
+        filter(prev_msa_name == "Central America") |>
+        arrange(desc(Estimate)) |>
+        head(20)
+
+mig_calcs_intl |>
+    filter("Central America" == prev_msa_name) |>
+    arrange(desc(Estimate)) |>
+    head(20)
+
+    mig_calcs |>
+        filter(prev_msa_name == "Central America") |>
+        arrange(desc(Estimate)) |>
+        filter(curr_metro_code != '99999') |>
+        mutate(
+               short_name = str_replace(curr_msa_name, "-.*", ""),
+               short_name = str_replace(short_name, ",.*", "")
+        ) |>
+        ggplot(aes(x=Estimate, y=in_share, label=short_name)) +
+        geom_point() +
+        geom_text_repel() 
+
+
+mig_calcs_old |>
+    mutate(
+           time_label = "2010-2014"
+    ) |>
+    rbind( 
+          mig_calcs |> 
+              mutate(
+                     time_label = "2016-2020"
+              )   
+    ) |>
+    filter(curr_msa_name == "San Antonio-New Braunfels, TX Metro Area") |>
+    select(prev_metro_code, prev_msa_name, time_label, Estimate, fair_share_score) |>
+    pivot_wider(names_from=time_label, values_from=c(Estimate, fair_share_score)) |>
+    mutate(
+            estimate_change = (`Estimate_2016-2020` / `Estimate_2010-2014`),
+            fair_share_change = (`fair_share_score_2016-2020` / `fair_share_score_2010-2014`),
+    ) |>
+    filter(estimate_change < 100) |>
+    filter(`Estimate_2010-2014` > 100) |>
+    arrange(desc(`Estimate_2010-2014`)) 
+
+    ggplot(aes(x=`Estimate_2010-2014`, y=estimate_change - 1, label=prev_msa_name)) +
+    geom_point() +
+    geom_text_repel() +
+    scale_y_continuous(labels = scales::percent) 
+
+
+
+```
+
+---
+
+```{r}
+
+names(acs)
+
+names(mega_dataset)
+
+texas_cities <- mega_dataset |>
+    filter(grepl("San Antonio|Dallas|Houston|Austin", GeoName, ignore.case = T)) |>
+    select(GeoFIPS, GeoName) |>
+    unique()
+
+texas_cities_codes <- texas_cities |> pull(GeoFIPS)
+
+# RACHSING            Race: Simplified race/ethnicity identification
+# 1                   White
+# 2                   Black/African American
+# 3                   American Indian/Alaska Native
+# 4                   Asian/Pacific Islander
+# 5                   Hispanic/Latino
+
+
+race_map <- c(
+    "1" = "White",
+    "2" = "Black/African American",
+    "3" = "American Indian/Alaska Native",
+    "4" = "Asian/Pacific Islander",
+    "5" = "Hispanic/Latino"
+)
+
+
+cities_race_stats <- acs |>
+    #filter(MET2013 %in% texas_cities_codes) |>
+    select(YEAR, MET2013, PERWT, RACHSING) |>
+    group_by(YEAR, MET2013, RACHSING) |>
+    summarise(
+      race_pop = sum(PERWT, na.rm=T)
+    ) |>
+    collect() |>
+    mutate(
+           race = race_map[RACHSING],
+           GeoFIPS = as.character(MET2013)
+    ) 
+
+tx_race_stats <- cities_race_stats |>
+    mutate(
+           race = race_map[RACHSING],
+           GeoFIPS = as.character(MET2013)
+    ) |>
+    left_join(texas_cities, by = "GeoFIPS") |>
+    filter(!is.na(GeoName)) |>
+    group_by(GeoFIPS, GeoName, YEAR) |>
+    mutate(
+           race_share = race_pop / sum(race_pop, na.rm=T)
+    ) |>
+    ungroup() |>
+    select(GeoFIPS, GeoName, YEAR, race, race_pop, race_share) |>
+    mutate(
+           # replace everythign after the firts dash with empty string
+           short_name = str_replace(GeoName, "-.*", "")
+    ) 
+
+tx_race_stats |>
+    filter(race == "Hispanic/Latino") |>
+    ggplot(aes(x=YEAR, y=race_share, color=short_name)) +
+    geom_line() +
+    geom_point() +
+    labs(
+         title = "Hispanic/Latino Share of Population in Texas Cities",
+         y = "Share of Population",
+         x = "",
+         color = "MSA",
+         caption = "Source: American Community Survey"
+    ) 
+
+```
+
+---
+
+```{r}
+
+tx_race_stats |> 
+    filter(YEAR %in% c(2010, 2020)) |>
+    group_by(short_name, race) |>
+    mutate(
+           race_growth = (race_pop[YEAR == 2020] / race_pop[YEAR == 2010])^(1/10) - 1
+    ) |>
+    filter(YEAR == 2010) |>
+    #filter(race == "Hispanic/Latino") |>
+    ggplot(aes(x=race_share, y=race_growth, label=short_name)) +
+    geom_point() +
+    geom_text_repel()  +
+    facet_wrap(~race, scales='free_y') +
+    scale_y_continuous(labels = scales::percent) +
+    labs(
+         title = "Population Growth by Race, Texas Cities",
+         x = "Share of Population in 2010",
+         y = "Population CAGR 2010-2020",
+         caption = "Source: American Community Survey"
+    )
+
+ggsave('imgs/texas-race-growth.png', width=9, height=6)
+
+```
+
+---
+
+```{r}
+
+tx_race_stats |>
+    filter(YEAR %in% c(2010, 2020)) |>
+    group_by(short_name, race) |>
+    mutate(
+           race_growth = (race_pop[YEAR == 2020] / race_pop[YEAR == 2010])^(1/10) - 1,
+           dem_shift = race_share[YEAR == 2020] - race_share[YEAR == 2010],
+    ) |>
+    filter(YEAR == 2010) |>
+    #filter(race == "Hispanic/Latino") |>
+    ggplot(aes(x=race_share, y=dem_shift, label=short_name)) +
+    geom_point() +
+    geom_text_repel()  +
+    facet_wrap(~race, scales='free_y') +
+    scale_y_continuous(labels = scales::percent) +
+    labs(
+         title = "Changes in Race Shares, Texas Cities",
+         x = "Share of Population in 2010",
+         y = "Percentage Point Change in Share 2010-2020",
+         caption = "Source: American Community Survey"
+    )
+
+ggsave('imgs/texas-race-shares-change.png', width=9, height=6)
+
+```
+
+---
+
+```{r}
+
+tx_race_stats |>
+    filter(YEAR %in% c(2010, 2020)) |>
+    select(short_name, YEAR, race, race_share) |>
+    pivot_wider(names_from=YEAR, values_from=race_share) |>
+    ggplot(aes(x=`2010`, y=`2020`, label=short_name)) +
+    geom_point() +
+    geom_text_repel() +
+    geom_abline() +
+    facet_wrap(~race, scales='free') +
+    scale_x_continuous(labels = scales::percent) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(
+         title = "Population Shares by Race, 2010 vs 2020",
+         x = "Share of Population in 2010",
+         y = "Share of Population in 2020",
+         caption = "Source: American Community Survey"
+    )
+
+ggsave('imgs/texas-race-shares-2010-2020.png', width=9, height=6)
+
+```
+
+---
+
+```{r}
+
+tx_race_stats |> 
+    filter(YEAR %in% c(2010, 2020)) |>
+    group_by(short_name, race) |>
+    mutate(
+           race_growth = race_pop[YEAR == 2020] - race_pop[YEAR == 2010]
+    ) |>
+    filter(YEAR == 2010) |>
+    #filter(race == "Hispanic/Latino") |>
+    ggplot(aes(x=race_share, y=race_growth, label=short_name)) +
+    geom_point() +
+    geom_text_repel()  +
+    facet_wrap(~race, scales='free_y') +
+    scale_y_continuous(labels = scales::comma) +
+    labs(
+         title = "Population Growth by Race, Texas Cities",
+         x = "Share of Population in 2010",
+         y = "Increase Since 2010",
+         caption = "Source: American Community Survey"
+    )
+
+ggsave('imgs/texas-race-growth-raw.png', width=9, height=6)
+
+```
+
+
+---
+
+```{r}
+
+msa_names <- mega_dataset |>
+    select(GeoFIPS, GeoName, short_name) |>
+    unique()
+
+# are places with high latin shares expected to increase latin shares?o
+# elements: race_share in 2010, race_share in 2020, and size of the place..
+
+cities_race_stats |>
+    left_join(msa_names) |>
+    group_by(YEAR, GeoFIPS, short_name) |>
+    mutate(
+           race_share = race_pop / sum(race_pop, na.rm=T)
+    ) |>
+    ungroup() |>
+    filter(YEAR %in% c(2010, 2020)) |>
+    filter(race == "Hispanic/Latino") |>
+    filter(MET2013 %in% top_cities_2020) |>
+    select(YEAR, short_name, race_share, GeoFIPS) |>
+    pivot_wider(names_from=YEAR, values_from=race_share) |>
+    ggplot(aes(x=`2010`, y=`2020`, label=short_name)) +
+    geom_smooth(method='lm') +
+    geom_point() +
+    geom_text_repel() +
+    geom_abline() +
+    scale_x_continuous(labels = scales::percent) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(
+         title = "Hispanic/Latino Share of Population in 2010 vs 2020",
+         x = "Share of Population in 2010",
+         y = "Share of Population in 2020",
+         caption = "Source: American Community Survey"
+    ) 
+
+ggsave('imgs/usa-hispanic-share-2010-2020.png', width=9, height=6)
+
+
+```
+
+---
+
+```{r}
+# confirm with regrssion
+
+reg_dat <- cities_race_stats |>
+    left_join(msa_names) |>
+    group_by(YEAR, GeoFIPS, short_name) |>
+    mutate(
+           race_share = race_pop / sum(race_pop, na.rm=T)
+    ) |>
+    ungroup() |>
+    filter(YEAR %in% c(2010, 2020)) |>
+    filter(race == "Hispanic/Latino") |>
+    filter(MET2013 %in% top_cities_2020) |>
+    select(YEAR, short_name, race_share, GeoFIPS) |>
+    pivot_wider(names_from=YEAR, values_from=race_share) 
+
+lm(`2020` ~ `2010`, data = reg_dat) |>
+    summary()
+
+rd <- cities_race_stats |>
+    left_join(msa_names) |>
+    group_by(YEAR, GeoFIPS, short_name) |>
+    mutate(
+           race_share = race_pop / sum(race_pop, na.rm=T)
+    ) |>
+    ungroup() |>
+    filter(YEAR %in% c(2010, 2020)) |>
+    filter(race == "Hispanic/Latino") |>
+    filter(MET2013 %in% top_cities_2020) |>
+    select(YEAR, short_name, race_share, GeoFIPS) |>
+    pivot_wider(names_from=YEAR, values_from=race_share) 
+
+library(broom)
+regdat2 <- 
+    cities_race_stats |>
+    left_join(msa_names) |>
+    group_by(YEAR, GeoFIPS, short_name) |>
+    mutate(
+           race_share = race_pop / sum(race_pop, na.rm=T)
+    ) |>
+    ungroup() |>
+    filter(YEAR %in% c(2010, 2020)) |>
+    #filter(race == "Hispanic/Latino") |>
+    filter(MET2013 %in% top_cities_2020) |>
+    select(YEAR, short_name, race, race_share, GeoFIPS) |>
+    pivot_wider(names_from=YEAR, values_from=race_share) |>
+    group_by(race) |>
+    group_modify(~tidy(lm(`2020` ~ `2010`, data = .x))) |>
+    filter(term == "`2010`") 
+
+
+lm(`2020` ~ `2010` + race, data = regdat2) |>
+    summary()
+
+```
+
+
+---
+
+```{r}
+
+cities_race_stats |> 
+    left_join(msa_names) |>
+    filter(MET2013 %in% top_cities_2020) |>
+    filter(YEAR %in% c(2010, 2020)) |>
+    select(GeoFIPS, short_name, race, race_pop)  |>
+    filter(race == "Hispanic/Latino") |>
+    pivot_wider(names_from=YEAR, values_from=race_pop) |>
+    ggplot(aes(x=`2010`, y=`2020`, label=short_name)) +
+    geom_abline() +
+    geom_point() +
+    geom_text_repel() +
+    scale_x_log10(labels = scales::comma) +
+    scale_y_log10(labels = scales::comma) +
+    labs(
+         title = "Hispanic/Latino Population in 2010 vs 2020",
+         x = "Population in 2010",
+         y = "Population in 2020",
+         caption = "Source: American Community Survey"
+    )
+ggsave('imgs/usa-hispanic-pop-2010-2020.png', width=9, height=6)
+
+    group_by(GeoFIPS, short_name, race) |>
+    mutate(
+           race_growth = (race_pop[YEAR == 2020] / race_pop[YEAR == 2010])^(1/10) - 1
+    ) |>
+    filter(YEAR == 2010) 
+|>
+    #filter(race == "Hispanic/Latino") |>
+    ggplot(aes(x=race_share, y=race_growth, label=short_name)) +
+    geom_point() +
+    geom_text_repel()  +
+    facet_wrap(~race, scales='free_y') +
+    scale_y_continuous(labels = scales::percent) +
+    labs(
+         title = "Population Growth by Race, Texas Cities",
+         x = "Share of Population in 2010",
+         y = "Population CAGR 2010-2020",
+         caption = "Source: American Community Survey"
+    )
+
+ggsave('imgs/texas-race-growth.png', width=9, height=6)
+
+```
+
+---
+
+```{r}
+
+
+transit_times <- acs |>
+    select(YEAR, MET2013, PERWT, TRANTIME) |>
+    group_by(YEAR, MET2013) |>
+    summarise(
+              avg_travel_time = sum(PERWT * TRANTIME, na.rm=T) / sum(PERWT, na.rm=T)
+    ) |>
+    collect()
+
+transit_times |>
+    mutate(
+           GeoFIPS = as.character(MET2013)
+    ) |>
+    left_join(msa_names, by = "GeoFIPS") |>
+    filter(GeoFIPS %in% top_cities_2020) |>
+    filter(YEAR %in% c(2010, 2020)) |>
+    pivot_wider(names_from=YEAR, values_from=avg_travel_time) |>
+    mutate(
+           growth = (`2020` / `2010`)^(1/10) - 1,
+    ) |>
+    ggplot(aes(x=`2010`, y=`2020`, label=short_name)) +
+    geom_smooth() +
+    geom_abline() +
+    geom_point() +
+    geom_text_repel() 
+
+
+
+```
+
+---
+
+```{r}
+
+top_cities_2020
+
+transit_times |>
+    mutate(
+           GeoFIPS = as.character(MET2013)
+    ) |>
+    left_join(msa_names, by = "GeoFIPS") |>
+    filter(GeoFIPS %in% top_cities_2020) |>
+    mutate(
+           # make short name a factor in order of top_cities_2020
+           short_name = factor(short_name, levels = msa_names$short_name[msa_names$GeoFIPS %in% top_cities_2020])
+    ) +
+    ggplot(aes(x=YEAR, y = avg_travel_time)) +
+    geom_line() +
+    geom_vline(xintercept = 2019) +
+    facet_wrap(~short_name) +
+    labs(
+         title = "Transit Time to Work in Major US Cities",
+         y = "Average Transit Time (minutes)",
+         x = "",
+         caption = "Source: American Community Survey"
+    )
+
+ggsave('imgs/transit-times-2010-2020.png', width=16, height=9)
+
+```
+
+---
+
+```{r}
+
+names(acs)
+
+transit_times_inds <- acs |>
+    select(YEAR, INDNAICS, PERWT, TRANTIME) |>
+    group_by(YEAR, INDNAICS) |>
+    summarise(
+              emps = sum(PERWT, na.rm=T),
+              avg_travel_time = sum(PERWT * TRANTIME, na.rm=T) / sum(PERWT, na.rm=T),
+              obs = n()
+    ) |>
+    collect()
+
+# should take only the top 20 by employment in the latest year
+
+transit_times_inds |>
+    filter(YEAR == 2020) |>
+    filter(INDNAICS != "0") |>
+    arrange(desc(emps)) |>
+    head(20) |>
+    pull(INDNAICS) -> top_inds
+
+transit_times_inds |>
+    filter(INDNAICS %in% top_inds) |>
+    mutate(INDNAICS = factor(INDNAICS, levels = top_inds)) |>
+    ggplot(aes(x=YEAR, y=avg_travel_time)) +
+    geom_line() +
+    geom_vline(xintercept = 2019) +
+    facet_wrap(~INDNAICS) +
+    labs(
+         title = "Transit Time to Work by Industry in Major US Cities",
+         y = "Average Transit Time (minutes)",
+         x = "",
+         caption = "Source: American Community Survey"
+    )
+
+ggsave('imgs/transit-times-industry-2010-2020.png', width=16, height=9)
+
+
+mega_dataset |>
+    filter(grepl("WY", GeoName, ignore.case = T)) |>
+    filter(year %in% c(2023)) |>
+    select(GeoName, GeoFIPS, year, starts_with("RPP"))
+
+```
+
+---
+
+```{r}
+
+
+acs |>
+    select(YEAR, MET2013, INDNAICS, PERWT, TRANTIME) |>
+    mutate(
+           # trim the indnaics to remove spaces
+           INDNAICS = str_trim(INDNAICS)
+    ) |>
+    group_by(YEAR, MET2013, INDNAICS) |>
+    summarise(
+              emps = sum(PERWT, na.rm=T),
+              avg_travel_time = sum(PERWT * TRANTIME, na.rm=T) / sum(PERWT, na.rm=T),
+              obs = n()
+    ) |>
+    collect() |>
+    filter(INDNAICS == '5415') |>
+    filter(MET2013 %in% top_cities_2020) |>
+    ggplot(aes(x=YEAR, y=avg_travel_time)) +
+    geom_boxplot(aes(group=YEAR)) +
+    labs(
+         title = "Average Transit Time to Work for Computer Systems Design and Related Services", 
+         x = "Year",
+         y = "Average Transit Time (minutes)",
+         caption = "Source: American Community Survey"
+    )
+
+ggsave('imgs/transit-times-professional-services-2010-2020.png', width=9, height=6)
+
+```
+
+
+---
+
+```{r}
+
+# memphis shift-share
+
+# ok lets take a look first at the 2-digit level. industry employment vs national employment etc. 
+
+natl_ind_stats <- acs |>
+  mutate(
+    naics_2digit = str_sub(INDNAICS, 1, 2),
+    naics_2_desc = case_when(
+      naics_2digit == '11' ~ 'Agriculture, Forestry, Fishing and Hunting',
+      naics_2digit == '21' ~ 'Mining, Quarrying, and Oil and Gas Extraction',
+      naics_2digit == '22' ~ 'Utilities',
+      naics_2digit == '23' ~ 'Construction',
+      naics_2digit %in% c('31', '32', '33') ~ 'Manufacturing',
+      naics_2digit == '42' ~ 'Wholesale Trade',
+      naics_2digit %in% c('44', '45') ~ 'Retail Trade',
+      naics_2digit %in% c('48', '49') ~ 'Transportation and Warehousing',
+      naics_2digit == '51' ~ 'Information',
+      naics_2digit == '52' ~ 'Finance and Insurance',
+      naics_2digit == '53' ~ 'Real Estate and Rental and Leasing',
+      naics_2digit == '54' ~ 'Professional, Scientific, and Technical Services',
+      naics_2digit == '55' ~ 'Management of Companies and Enterprises',
+      naics_2digit == '56' ~ 'Administrative and Support and Waste Management and Remediation Services',
+      naics_2digit == '61' ~ 'Educational Services',
+      naics_2digit == '62' ~ 'Health Care and Social Assistance',
+      naics_2digit == '71' ~ 'Arts, Entertainment, and Recreation',
+      naics_2digit == '72' ~ 'Accommodation and Food Services',
+      naics_2digit == '81' ~ 'Other Services (except Public Administration)',
+      naics_2digit == '92' ~ 'Public Administration'
+    )
+  ) %>%
+  filter(EMPSTAT == 1) %>%
+  group_by(YEAR, naics_2_desc) |>
+  summarise(
+    natl_ind_emp = sum(PERWT, na.rm=T),
+  ) |>
+  ungroup() |>
+  group_by(YEAR) |>
+  mutate(
+    total_emp = sum(natl_ind_emp)
+  ) |>
+  ungroup() |>
+  mutate(
+    natl_ind_share = natl_ind_emp / total_emp
+  ) |>
+  collect()
+
+acs_short_industry_shares <- acs |>
+  filter(EMPSTAT == 1) |>
+  mutate(
+    naics_2digit = str_sub(INDNAICS, 1, 2),
+    naics_2_desc = case_when(
+      naics_2digit == '11' ~ 'Agriculture, Forestry, Fishing and Hunting',
+      naics_2digit == '21' ~ 'Mining, Quarrying, and Oil and Gas Extraction',
+      naics_2digit == '22' ~ 'Utilities',
+      naics_2digit == '23' ~ 'Construction',
+      naics_2digit %in% c('31', '32', '33') ~ 'Manufacturing',
+      naics_2digit == '42' ~ 'Wholesale Trade',
+      naics_2digit %in% c('44', '45') ~ 'Retail Trade',
+      naics_2digit %in% c('48', '49') ~ 'Transportation and Warehousing',
+      naics_2digit == '51' ~ 'Information',
+      naics_2digit == '52' ~ 'Finance and Insurance',
+      naics_2digit == '53' ~ 'Real Estate and Rental and Leasing',
+      naics_2digit == '54' ~ 'Professional, Scientific, and Technical Services',
+      naics_2digit == '55' ~ 'Management of Companies and Enterprises',
+      naics_2digit == '56' ~ 'Administrative and Support and Waste Management and Remediation Services',
+      naics_2digit == '61' ~ 'Educational Services',
+      naics_2digit == '62' ~ 'Health Care and Social Assistance',
+      naics_2digit == '71' ~ 'Arts, Entertainment, and Recreation',
+      naics_2digit == '72' ~ 'Accommodation and Food Services',
+      naics_2digit == '81' ~ 'Other Services (except Public Administration)',
+      naics_2digit == '92' ~ 'Public Administration'
+    )
+  ) %>%
+  group_by(MET2013, YEAR, naics_2_desc) |>
+  summarise(
+    city_ind_emp = sum(PERWT, na.rm=T)
+  ) |>
+  ungroup() |>
+  group_by(MET2013, YEAR) |>
+  mutate(
+      city_total_emp = sum(city_ind_emp, na.rm=T)
+  ) |>
+  ungroup() |>
+  left_join(natl_ind_stats, by = c("YEAR", "naics_2_desc")) |>
+  mutate(
+    city_ind_share = city_ind_emp / city_total_emp,
+    city_ind_markeshare = city_ind_emp / natl_ind_emp,
+    city_ind_rca = city_ind_share / natl_ind_share
+  ) |>
+  collect()
+
+
+acs_short_industry_shares |>
+  filter(MET2013 == 32820) |>
+  filter(!is.na(naics_2_desc)) |>
+  #filter(city_ind_share > 0.005) |>
+  ggplot(aes(x=YEAR, y=city_ind_emp, color=naics_2_desc)) +
+  geom_line(alpha = 0.5) +
+  geom_line(data = . %>% filter(naics_2_desc == "Manufacturing")) +
+  geom_text_repel(data = . %>%
+                    filter(YEAR == 2022) %>%
+                    filter(city_ind_emp > 40000),
+    aes(label=naics_2_desc)) +
+  scale_x_continuous(n.breaks = 10) +
+  scale_y_continuous(labels=scales::comma) +
+  theme(legend.position = 'none') +
+  labs(
+    title = "Employment by Sector, Memphis",
+    y = "Estimated Employment",
+    x = "",
+    caption = "Source: American Community Survey"
+  )
+
+acs_short_industry_shares |>
+  filter(MET2013 == 32820) |>
+  filter(YEAR >= 2010 & YEAR <= 2020) |>
+  filter(!is.na(naics_2_desc)) |>
+  group_by(naics_2_desc) |>
+  mutate(
+    emp_2020 = first(city_ind_emp[YEAR == 2020]),
+    emp_2010 = first(city_ind_emp[YEAR == 2010])
+  ) |>
+  ungroup() |>
+  mutate(
+    naics_2_desc = fct_reorder(naics_2_desc, emp_2010, .desc = TRUE)
+  ) |>
+  ggplot(aes(x=YEAR, y=city_ind_markeshare, color=naics_2_desc)) +
+  geom_line(alpha = 0.5) +
+  geom_line(data = . %>% filter(naics_2_desc == "Manufacturing")) +
+  # geom_text_repel(data = . %>%
+  #                   filter(YEAR == 2022),
+  #                 aes(label=naics_2_desc)) +
+  scale_x_continuous(n.breaks = 3) +
+  scale_y_continuous(labels=scales::percent) +
+  theme(legend.position = 'none') +
+  labs(
+    title = "Employment by Sector, Memphis",
+    y = "Share of National Employment in Sector",
+    x = "",
+    caption = "Source: American Community Survey"
+  ) +
+  # label each facet max length is 25 
+  facet_wrap(~ naics_2_desc, scales = 'free_y', labeller = label_wrap_gen(width = 20))
+
+```
+
+---
+
+```{r}
+
+# ok lets focus on shift-share
+
+# we want to look at employment between two years (2010, 2020)
+# national growth effect 
+# industry effect 
+# local share effect? 
+
+# national Share = employment in 2010 * national growth rate of employment 
+# industry mix effect = employment in 2010 * (national growth rate of employment in industry - national growth rate of employment)
+# local share effect = employment in 2010 * (city growth in employment in industry - national growth rate of employment in industry)
+
+y1 <- 2010
+y2 <- 2019
+
+acs_short_industry_shares |>
+  filter(MET2013 == 32820) |>
+  filter(YEAR %in% c(y1, y2)) |>
+  filter(!is.na(naics_2_desc)) |>
+  group_by(naics_2_desc) |>
+  summarise(
+            G = (first(total_emp[YEAR == y2]) - first(total_emp[YEAR == y1])) / first(total_emp[YEAR == y1]),
+
+            G_ind = (first(natl_ind_emp[YEAR == y2]) - first(natl_ind_emp[YEAR == y1])) / first(natl_ind_emp[YEAR == y1]),
+            G_city = (first(city_ind_emp[YEAR == y2]) - first(city_ind_emp[YEAR == y1])) / first(city_ind_emp[YEAR == y1]),
+
+            eit = first(city_ind_emp[YEAR == y1]),
+
+            ns = eit * G,
+            im = eit * (G_ind - G),
+            rs = eit * (G_city - G_ind),
+
+            calculated_emp_diff = ns + im + rs,
+            actual_emp_diff = first(city_ind_emp[YEAR == y2]) - first(city_ind_emp[YEAR == y1]),
+  ) |>
+  mutate(
+         emp_share = eit / sum(eit, na.rm=T)
+  ) |>
+  arrange(desc(emp_share)) |>
+  select(naics_2_desc, eit, calculated_emp_diff, ns, im, rs) |>
+  rename(
+    `National Growth Effect` = ns,
+    `Industry Mix Effect` = im,
+    `City Share Effect` = rs
+  ) |>
+  pivot_longer(-c(naics_2_desc, eit, calculated_emp_diff), names_to = "effect", values_to = "value") |>
+  ggplot(aes(x=value, y=reorder(naics_2_desc, calculated_emp_diff), fill=effect)) +
+  geom_col(position = 'stack') +
+  geom_point(aes(x = calculated_emp_diff), fill=NA, color = 'black', size = 2) +
+  scale_x_continuous(labels = scales::comma) 
+  
+```
+
+---
+
+```{r}
+
+# manu intensive cities in 2010
+manu_intensive <- acs_short_industry_shares |>
+    group_by(MET2013, YEAR) |>
+    arrange(desc(city_ind_share)) |>
+    mutate(
+           # of all the city_in
+           ind_rank = row_number(),
+    ) |>
+    ungroup() |>
+    #filter(YEAR == 2006) |>
+    filter(naics_2_desc == "Manufacturing") |>
+    arrange(desc(city_ind_share)) |>
+    mutate(GeoFIPS = as.character(MET2013)) |>
+    left_join(msa_names, by = "GeoFIPS") 
+
+names(manu_intensive)
+
+manu_intensive |>
+    filter(GeoFIPS %in% top_cities_2020) |>
+    filter(!is.na(short_name)) |>
+    filter(YEAR %in% c(2006, 2020)) |>
+    filter(city_ind_emp > 30000) |>
+    ggplot(aes(x=city_ind_share, y=city_ind_emp, label=short_name)) +
+    geom_point(data = . %>% filter(YEAR == 2006)) +
+    geom_segment(
+                 data = . %>% 
+                     group_by(short_name) %>%
+                     summarise(
+                            x = first(city_ind_share[YEAR == 2006]),
+                            xend = first(city_ind_share[YEAR == 2020]),
+                            y = first(city_ind_emp[YEAR == 2006]),
+                            yend = first(city_ind_emp[YEAR == 2020]),
+                            ind_rank = first(ind_rank[YEAR == 2006])
+                            ),
+                 aes(x=x, xend=xend, y=y, yend=yend),
+                 arrow = arrow(length = unit(0.2, "cm")),
+    ) +
+    geom_text_repel(
+                 data = . %>% 
+                     group_by(short_name) %>%
+                     summarise(
+                            x = first(city_ind_share[YEAR == 2006]),
+                            xend = first(city_ind_share[YEAR == 2020]),
+                            y = first(city_ind_emp[YEAR == 2006]),
+                            yend = first(city_ind_emp[YEAR == 2020]),
+                            ind_rank = first(ind_rank[YEAR == 2006])
+                            ),
+                    aes(x=(x+xend)/2, y=(y+yend)/2, label=short_name),
+    ) +
+    geom_point(data = . %>% filter(short_name == "Memphis") %>% filter(YEAR == 2006), color='red', size=3) +
+    geom_segment(
+                 data = . %>% 
+                     group_by(short_name) %>%
+                     summarise(
+                            x = first(city_ind_share[YEAR == 2006]),
+                            xend = first(city_ind_share[YEAR == 2020]),
+                            y = first(city_ind_emp[YEAR == 2006]),
+                            yend = first(city_ind_emp[YEAR == 2020]),
+                            ) %>%
+                     filter(short_name == "Memphis"),
+                 aes(x=x, xend=xend, y=y, yend=yend),
+                 arrow = arrow(length = unit(0.2, "cm")),
+                 color='red'
+    )  
+
+
+manu_intensive |>
+    group_by(GeoFIPS, short_name) |>
+    summarise(
+              city_ind_share = first(city_ind_share[YEAR == 2006]),
+              ind_emp_change = first(city_ind_emp[YEAR == 2020]) - first(city_ind_emp[YEAR == 2006]),
+              ind_emp_change_pct = ind_emp_change / first(city_ind_emp[YEAR == 2006]),
+    ) |>
+    filter(GeoFIPS %in% top_cities_2020) |>
+    ggplot(aes(x=city_ind_share, y=ind_emp_change_pct, label=short_name)) +
+    geom_hline(yintercept = 0, color='grey') +
+    geom_point() +
+    geom_point(data = . %>% filter(short_name == "Memphis"), color='red', size=3) +
+    geom_text_repel() 
+
+
+
+# i need to show that memphis tradable sector was concentrated in manu
+# not just that based on employment shares because of the multiplier effect...
+    # but actually if i look, manufacturing is big in many many sectors
+    # memphis is not particularly special wrt to its manufacturing mployment
+```
+
+
+---
+
+```{r}
+
+bls_emp_dat <- read_parquet('data/bls/bls_employment_data_cleaned.parquet')
+
+names(bls_emp_dat)
+
+bls_emp_dat |>
+    filter(Area != "Statewide") |>
+    select(-Series_Id) |>
+    select(Area) |>
+    unique() |>
+    arrange((Area)) |>
+    pull(Area)
+
+
+# what if i just take the top cities labor data...
+|>
+    View()
+
+    filter(grepl("Memphis", Area, ignore.case = T)) 
+
+```
+
+---
+
+```{r}
+
+merged_annual_natl_results
+memphis_dat_test
+
+memphis_dat_test 
+
+memphis_merged <- memphis_dat_test |>
+    mutate(year = year(date)) |>
+    left_join(merged_annual_natl_results %>%
+              rename(natl_emps = value), by = c("year", "sector" = "title"))
+
+memphis_merged |>
+    filter(sector != "Total Nonfarm") |>
+    #filter(!sector %in% c("Retail Trade", "Wholesale Trade")) |>
+    filter(sector != "Trade, Transportation, and Utilities") |>
+    mutate(
+           market_share = value / natl_emps,
+    ) |>
+    filter(sector != "Other Services") |>
+    #filter(year %in% c(1990, 2000, 2010, 2020)) |>
+    filter(year %in% seq(1990, 2020, by=10)) |>
+    arrange(year) |>
+    ggplot(aes(x=value, y=market_share, color=sector, label=str_wrap(sector, 15))) +
+    geom_path(arrow = arrow(length = unit(0.2, "cm"))) +
+    geom_point(data = . %>% filter(year != 2020), pch=21, fill='white') +
+    geom_text_repel(data = . %>% filter(year == 2020)) +
+    theme(legend.position = 'none') +
+    scale_y_continuous(labels = scales::percent) +
+    labs(
+         title = "Memphis Sectoral Employment from 1990 to 2020",
+         y = "Share of National Employment",
+         x = "Employment in Memphis (Thousands)",
+         caption = "Source: FRED, Bureau of Labor Statistics"
+    )
+
+ggsave('imgs/memphis-labor-market-share.png', width=9, height=6)
+
+```
+
+```{r}
+
+
+memphis_merged |>
+    filter(sector == "Transportation and Warehousing") |>
+    filter(year %in% c(1990, 2000, 2020))
+
+memphis_merged |>
+    filter(sector != "Total Nonfarm") |>
+    #filter(!sector %in% c("Retail Trade", "Wholesale Trade")) |>
+    filter(sector != "Trade, Transportation, and Utilities") |>
+    filter(sector != "Other Services") |>
+    mutate(
+           market_share = value / natl_emps,
+           sector = factor(sector, levels = memphis_merged %>% 
+                           filter(year == 1990) %>% 
+                           arrange(desc(value)) %>% 
+                           pull(sector))
+    ) |>
+    #filter(year %in% c(1990, 2000, 2010, 2020)) |>
+    filter(year %in% seq(1990, 2020, by=10)) |>
+    arrange(year) |>
+    ggplot(aes(x=value, y=market_share, label=str_wrap(sector, 15))) +
+    geom_path(arrow = arrow(length = unit(0.2, "cm"))) +
+    geom_point(data = . %>% filter(year != 2020), pch=21, fill='white') +
+    theme(legend.position = 'none') +
+    scale_y_continuous(labels = scales::percent) +
+    facet_wrap(~sector) +
+    labs(
+         title = "Memphis Sectoral Employment from 1990 to 2020",
+         y = "Share of National Employment",
+         x = "Employment in Memphis (Thousands)",
+         caption = "Source: FRED, Bureau of Labor Statistics"
+    )
+
+ggsave('imgs/memphis-labor-market-share-faceted.png', width=9, height=9)
+
+```
+
+
+---
+
+```{r}
+
+memphis_merged |>
+    filter(!sector %in% c("Retail Trade", "Wholesale Trade")) |>
+    ggplot(aes(x=year, y=value, fill=sector)) +
+    geom_bar(data = . %>% filter(sector != "Total Nonfarm"), stat='identity', position='stack') +
+    geom_line(data = . %>% filter(sector == "Total Nonfarm")) 
+
+
+```
+
 
 
 

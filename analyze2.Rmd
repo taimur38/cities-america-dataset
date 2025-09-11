@@ -1,0 +1,418 @@
+---
+title: "USA Cities Dataset"
+author: "Taimur Shah"
+output:
+    pdf_document: beamer_presentation
+    html_document: default
+fontsize: 11pt
+
+
+classoption: "aspectratio=169"
+---
+
+```{r, echo=FALSE, message=FALSE, results='hide'}
+
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(fig.width=10, fig.height = 6)
+
+options(knitr.table.format = "latex")
+options(kable_styling_position = "center")
+options(kable_styling_latex_options = "scale_down")
+
+library(tidyverse)
+library(ggthemes)
+library(ggrepel)
+library(readxl)
+library(arrow)
+library(patchwork)
+
+theme_set(theme_few())
+
+mega_dataset <- read_parquet('data/mega_dataset2.parquet')
+
+mega_dataset <- mega_dataset |>
+    mutate(
+           short_name = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           short_name = str_extract(short_name, "^[^,]+"),
+           short_name = str_extract(short_name, "^[^-]+"),
+
+           real_mean_wage = mean_wage / (`RPPs: All items` / 100),
+
+           real_mean_wage_housing = mean_wage / (`RPPs: Services: Housing` / 100),
+    )
+
+acs <- open_dataset('data/shared-data/ipums/acs-cities.parquet')
+
+migration_dataset <- read_excel('data/metro-to-metro-2016-2020.xlsx', sheet='Sheet2')
+migration_2010_dataset <- read_excel('data/metro-to-metro-2010-2014.xlsx', sheet='Sheet2')
+
+top_cities_2020 <- mega_dataset |>
+    filter(year == 2020) |>
+    arrange(desc(implied_population)) |>
+    head(50) |>
+    pull(GeoFIPS)
+
+names(mega_dataset)
+
+# mega_dataset |>
+#     select(`RPPs: All items`, `Implicit regional price deflator`) |>
+#     mutate(
+#            check = 1/`RPPs: All items`
+#     )
+
+kishan_one <- mega_dataset |>
+    mutate(
+           #nominal_pc_income = `Real per capita personal income (constant (2017) dollars) 2/` * (`RPPs: All items` / 100),
+           nominal_pc_income = mean_wage,
+
+           fuzzy_wage = ifelse(is.na(mean_wage), `Real per capita personal income (constant (2017) dollars) 2/` * (`RPPs: All items`/100), mean_wage),
+
+    ) |>
+    group_by(GeoFIPS) |>
+    mutate(
+           net_migrant_rate = net_migrants_2010s / implied_population[year == 2010],
+
+           population_cagr = (implied_population[year == 2020] / implied_population[year == 2010])^(1/10) - 1,
+
+           nominal_cagr = (nominal_pc_income[year == 2020] / nominal_pc_income[year == 2010])^(1/10) - 1,
+
+           fuzzy_cagr = (fuzzy_wage[year == 2020] / fuzzy_wage[year == 2010])^(1/10) - 1,
+
+           real_wage_cagr = (real_mean_wage[year == 2020] / real_mean_wage[year == 2010])^(1/10) - 1,
+    ) |>
+    ungroup() |>
+    filter(year == 2020)
+    #filter(year %in% c(2010, 2020)) 
+
+avg_nom_cagr = median(kishan_one$nominal_cagr, na.rm=T)
+avg_net_migrant_rate = median(kishan_one$net_migrant_rate, na.rm=T)
+
+case_studies <- c("Memphis", "Austin", "San Antonio", "San Jose", "Cheyenne", "Casper")
+
+case_studies_df <- mega_dataset |>
+    filter(grepl(paste(case_studies, collapse='|'), GeoName, ignore.case = T)) |>
+    select(GeoFIPS, GeoName, short_name) |>
+    unique()
+
+```
+
+
+---
+
+```{r}
+
+# add the diagonal lines, which cross at the (avg_net_migrant_rate, avg_nom_cagr) point
+# so that is geom_abline with slope -1 and intercept avg_nom_cagr + avg_net_migrant_rate
+
+kishan_one |>
+    filter(net_migrant_rate < 0.4) |>
+    mutate(
+           GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           GeoName = str_extract(GeoName, "^[^,]+"),
+           GeoName = str_extract(GeoName, "^[^-]+"),
+    ) |>
+    ggplot(aes(x=net_migrant_rate, y=fuzzy_cagr, label=GeoName)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
+    geom_point( alpha = 0.5 ) +
+    geom_point(data = . %>% filter(GeoFIPS %in% top_cities_2020), color='red') +
+    geom_abline() +
+    geom_abline(intercept = avg_nom_cagr + avg_net_migrant_rate, slope=-1) +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% top_cities_2020)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Mean Wage CAGR (2010-2020)",
+         title = "Changes in Nominal Income vs Net Migration Rate",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+ggsave('imgs/45-lines.png' , width=10, height=10)
+
+ggsave('imgs/kishan-one.png', width=10, height=10)
+
+```
+
+---
+
+
+```{r}
+
+# ok not actually using slope = 1, but a slope that puts equal amounts of cities above and below the line ...
+# within the same quadrant 
+
+# so the first line cares about data points in quadrant 1 and quadrant 3 
+# the line must pass through the avg point (avg_net_migrant_rate, avg_nom_cagr)
+# points above the line should be equal to the number of points below the line 
+# or svm..
+
+
+kishan_one |>
+    filter(net_migrant_rate < 0.4) |>
+    mutate(
+           GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           GeoName = str_extract(GeoName, "^[^,]+"),
+           GeoName = str_extract(GeoName, "^[^-]+"),
+    ) |>
+    ggplot(aes(x=net_migrant_rate, y=fuzzy_cagr, label=GeoName)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
+    geom_point( alpha = 0.5 ) +
+    geom_point(data = . %>% filter(GeoFIPS %in% top_cities_2020), color='red') +
+    geom_smooth(data = . %>% 
+                filter((net_migrant_rate > avg_net_migrant_rate & fuzzy_cagr > avg_nom_cagr) | 
+                    (net_migrant_rate < avg_net_migrant_rate & fuzzy_cagr < avg_nom_cagr)), 
+                color='blue', 
+                method='lm' 
+    ) +
+    geom_smooth(data = . %>% 
+                filter((net_migrant_rate < avg_net_migrant_rate & fuzzy_cagr > avg_nom_cagr) | 
+                    (net_migrant_rate > avg_net_migrant_rate & fuzzy_cagr < avg_nom_cagr)),
+                method = 'lm'
+    ) +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% top_cities_2020)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Mean Wage CAGR (2010-2020)",
+         title = "Changes in Nominal Income vs Net Migration Rate",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+
+
+```
+
+---
+
+```{r}
+
+gdat <- kishan_one |>
+    filter(net_migrant_rate < 0.4) |>
+    mutate(
+           GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           GeoName = str_extract(GeoName, "^[^,]+"),
+           GeoName = str_extract(GeoName, "^[^-]+"),
+    )  |>
+    mutate(
+        quadrant = case_when(
+            net_migrant_rate > avg_net_migrant_rate & fuzzy_cagr > avg_nom_cagr ~ 1,
+            net_migrant_rate > avg_net_migrant_rate & fuzzy_cagr < avg_nom_cagr ~ 2,
+            net_migrant_rate < avg_net_migrant_rate & fuzzy_cagr < avg_nom_cagr ~ 3,
+            net_migrant_rate < avg_net_migrant_rate & fuzzy_cagr > avg_nom_cagr ~ 4,
+            TRUE ~ NA_real_
+        )
+    )
+
+
+m1 <- gdat |> 
+    filter(quadrant == 1 | quadrant == 3) |>
+        # filter((net_migrant_rate > avg_net_migrant_rate & fuzzy_cagr > avg_nom_cagr) | 
+        #        (net_migrant_rate < avg_net_migrant_rate & fuzzy_cagr < avg_nom_cagr)) |>
+        mutate(ratio = fuzzy_cagr / net_migrant_rate) |> 
+        pull(ratio) |>
+        median(na.rm=T)
+
+m1_intercept <- avg_nom_cagr - m1 * avg_net_migrant_rate
+
+m2 <- gdat |> 
+    filter(quadrant == 2 | quadrant == 4) |>
+    # filter((net_migrant_rate < avg_net_migrant_rate & fuzzy_cagr > avg_nom_cagr) | 
+    #     (net_migrant_rate > avg_net_migrant_rate & fuzzy_cagr < avg_nom_cagr)) |>
+    mutate(ratio = -1 * abs(fuzzy_cagr) / abs(net_migrant_rate)) |>
+    pull(ratio) |>
+    median(na.rm=T) 
+
+m2
+
+m2_intercept <- avg_nom_cagr - m2 * avg_net_migrant_rate
+
+gdat |>
+    ggplot(aes(x=net_migrant_rate, y=fuzzy_cagr, label=GeoName)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
+    geom_point( alpha = 0.5 ) +
+    geom_point(data = . %>% filter(GeoFIPS %in% top_cities_2020), color='red') +
+    geom_abline(slope = m1, intercept = m1_intercept ) +
+    geom_abline(slope = m2, intercept = m2_intercept ) +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% top_cities_2020)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Mean Wage CAGR (2010-2020)",
+         title = "Changes in Nominal Income vs Net Migration Rate",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+
+ggsave('imgs/median-of-ratios.png', width=10, height=10)
+
+```
+
+---
+
+```{r}
+
+# now do same but with a median per quadrant 
+
+quadrants_dat <- gdat |> 
+    mutate(
+        minmin = min(net_migrant_rate, na.rm=T),
+        maxmax = max(net_migrant_rate, na.rm=T)
+    ) |>
+    group_by(quadrant) |>
+    summarize(
+            max_x = max(net_migrant_rate, na.rm=T),
+            min_x = min(net_migrant_rate, na.rm=T),
+
+            max_y = max(fuzzy_cagr, na.rm=T), 
+            min_y = min(fuzzy_cagr, na.rm=T), 
+
+            minmin = mean(minmin, na.rm=T),
+            maxmax = mean(maxmax, na.rm=T),
+
+            m = median((fuzzy_cagr - avg_nom_cagr) / (net_migrant_rate - avg_net_migrant_rate), na.rm=T),
+
+            n = n(), 
+    ) |> 
+    ungroup() |>
+    mutate( 
+        intercept = avg_nom_cagr - m * avg_net_migrant_rate,
+        endpoint = case_when(
+                                quadrant == 1 ~ maxmax * m + intercept, 
+                                quadrant == 2 ~ maxmax * m + intercept,
+                                quadrant == 3 ~ minmin * m + intercept,
+                                quadrant == 4 ~ minmin * m + intercept,
+                                quadrant == NA ~ NA_real_
+            )
+    ) |> 
+    filter(!is.na(quadrant))
+
+names(gdat)
+
+gdat |>
+    ggplot(aes(x=net_migrant_rate, y=fuzzy_cagr)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
+    geom_point(alpha = 0.5 ) +
+    geom_point(data = . %>% filter(GeoFIPS %in% top_cities_2020), color='red') +
+    geom_segment(data = quadrants_dat,  
+                aes(xend = ifelse(quadrant > 2, min_x, max_x), 
+                    yend = endpoint),
+                x = avg_net_migrant_rate,
+                y = avg_nom_cagr,
+    ) +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% top_cities_2020), aes(label=GeoName)) +
+    coord_cartesian(ylim = c(-0.025, 0.05)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Mean Wage CAGR (2010-2020)",
+         title = "Changes in Nominal Income vs Net Migration Rate",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+
+
+ggsave('imgs/median-per-quadrant.png', width=10, height=10)
+
+```
+
+---
+
+```{r}
+
+kishan_one |>
+    filter(net_migrant_rate < 0.4) |>
+    mutate(
+           GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           GeoName = str_extract(GeoName, "^[^,]+"),
+           GeoName = str_extract(GeoName, "^[^-]+"),
+    ) |>
+    ggplot(aes(x=net_migrant_rate, y=fuzzy_cagr, label=GeoName)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
+    geom_point( alpha = 0.5 ) +
+    geom_point(data = . %>% filter(GeoFIPS %in% case_studies_df$GeoFIPS), color='red') +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% case_studies_df$GeoFIPS)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Mean Wage CAGR (2010-2020)",
+         title = "Changes in Nominal Income vs Net Migration Rate",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+
+ggsave('imgs/adding-wyoming-casestudies.png', width=10, height=10)
+
+```
+
+
+---
+
+```{r}
+
+mega_dataset |>
+    mutate(
+           #nominal_pc_income = `Real per capita personal income (constant (2017) dollars) 2/` * (`RPPs: All items` / 100),
+           nominal_pc_income = mean_wage,
+
+           fuzzy_wage = ifelse(is.na(mean_wage), `Real per capita personal income (constant (2017) dollars) 2/` * (`RPPs: All items`/100), mean_wage),
+
+    ) |>
+    group_by(GeoFIPS) |>
+    mutate(
+           net_migrant_rate = net_migrants_2010s / implied_population[year == 2010],
+
+           population_cagr = (implied_population[year == 2020] / implied_population[year == 2010])^(1/10) - 1,
+
+           nominal_cagr = (nominal_pc_income[year == 2020] / nominal_pc_income[year == 2010])^(1/10) - 1,
+
+           fuzzy_cagr = (fuzzy_wage[year == 2020] / fuzzy_wage[year == 2010])^(1/10) - 1,
+
+           real_wage_cagr = (real_mean_wage[year == 2020] / real_mean_wage[year == 2010])^(1/10) - 1,
+    ) |>
+    ungroup() |>
+    filter(grepl("Cheyenne|Casper", GeoName, ignore.case = T)) |>
+    ggplot(aes(x=year, y=fuzzy_wage, color=GeoName)) +
+    geom_vline(xintercept = 2010, linetype='dashed') +
+    geom_vline(xintercept = 2020, linetype='dashed') +
+    geom_line() +
+    geom_point() 
+    #filter(yea
+
+
+```
+
+
+```{r}
+
+kishan_one |>
+    filter(net_migrant_rate < 0.4) |>
+    mutate(
+           GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           GeoName = str_extract(GeoName, "^[^,]+"),
+           GeoName = str_extract(GeoName, "^[^-]+"),
+    ) |>
+    ggplot(aes(x=net_migrant_rate, y=fuzzy_cagr, label=GeoName)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
+    geom_abline() +
+    geom_abline(intercept = avg_nom_cagr + avg_net_migrant_rate, slope=-1) +
+    geom_point( alpha = 0.5 ) +
+    geom_point(data = . %>% filter(GeoFIPS %in% case_studies_df$GeoFIPS), color='red') +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% case_studies_df$GeoFIPS)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Mean Wage CAGR (2010-2020)",
+         title = "Changes in Nominal Income vs Net Migration Rate",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+
+```
+

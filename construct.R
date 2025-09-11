@@ -41,9 +41,6 @@ rpp_long <- rpp_dat |>
 
 
 rpp_long |>
-    select(Description, Unit) |> unique()
-
-rpp_long |>
     filter(Description == "Real per capita personal income (constant (2017) dollars) 2/") |>
     filter(year == 2023) |>
     # take (Metropolitan Statistical Area) out of GeoName
@@ -177,8 +174,23 @@ median_wages_time <- read_csv('data/median_wages_estimatedmsas.csv') |>
            AREA = as.character(AREA),
     )
 
-median_wages_time |>
-    arrange(AREA, year)
+metro_wages <- read_csv('data/shared-data/ipums/metro_wages.csv') |>
+    left_join(msa_names, by=c('MET2013'='metro_id')) |>
+    rename(
+           year = YEAR,
+           GeoFIPS = MET2013,
+    ) |>
+    mutate(GeoFIPS = as.character(GeoFIPS)) 
+
+wage_premiums <- read_parquet('data/metro_wage_premiums.parquet') |>
+    select(
+           msa, YEAR, demeaned
+    ) |>
+    rename(
+           GeoFIPS = msa,
+           year = YEAR,
+           wage_premium = demeaned
+    ) 
 
 mega_dataset <- rpp_long |>
     filter(GeoFIPS != "00000" & GeoFIPS != "00999") |>
@@ -191,8 +203,64 @@ mega_dataset <- rpp_long |>
            implied_population = `Real personal income (millions of constant (2017) dollars)` * 1E6 / `Real per capita personal income (constant (2017) dollars) 2/`,
     ) |>
     arrange(desc(implied_population)) |>
-    left_join(median_wages_time, by=c('GeoFIPS'='AREA', 'year')) 
+    left_join(metro_wages) |>
+    left_join(wage_premiums) 
 
-write_parquet(mega_dataset, 'data/mega_dataset.parquet')
+
+mega_dataset <- mega_dataset |>
+    mutate(
+           short_name = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           short_name = str_extract(short_name, "^[^,]+"),
+           short_name = str_extract(short_name, "^[^-]+"),
+    )
+
+write_parquet(mega_dataset, 'data/mega_dataset2.parquet')
+
+# now we also have wage premiums to add 
 
 
+# calculate the number of effective places an industry is in 
+
+# educ
+# EDUC                Educational attainment [general version]
+# 00                  N/A or no schooling
+# 01                  Nursery school to grade 4
+# 02                  Grade 5, 6, 7, or 8
+# 03                  Grade 9
+# 04                  Grade 10
+# 05                  Grade 11
+# 06                  Grade 12
+# 07                  1 year of college
+# 08                  2 years of college
+# 09                  3 years of college
+# 10                  4 years of college
+# 11                  5+ years of college
+# 99                  Missing
+
+# RACHSING            Race: Simplified race/ethnicity identification
+# 1                   White
+# 2                   Black/African American
+# 3                   American Indian/Alaska Native
+# 4                   Asian/Pacific Islander
+# 5                   Hispanic/Latino
+
+# acs |>
+#     group_by(YEAR, INDNAICS) |>
+#     mutate(
+#            natl_pop = sum(PERWT, na.rm=T),
+#            natl_ind_emp = sum(PERWT, na.rm=T),
+#     ) |>
+#     ungroup() |>
+#     group_by(MET2013, YEAR, INDNAICS) |>
+#     mutate(
+#            city_pop = sum(PERWT, na.rm=T),
+#            city_ind_emp = sum(PERWT, na.rm=T),
+# 
+#            city_pop_share = city_pop / natl_pop,
+#            city_ind_share = city_ind_emp / natl_ind_emp,
+#     ) |>
+#     ungroup() 
+# 
+# 
+# 
+# 
