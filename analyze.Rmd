@@ -3511,6 +3511,7 @@ acs_short_industry_shares |>
 y1 <- 2010
 y2 <- 2019
 
+# shift share calc
 acs_short_industry_shares |>
   filter(MET2013 == 32820) |>
   filter(YEAR %in% c(y1, y2)) |>

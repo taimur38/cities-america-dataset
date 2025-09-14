@@ -30,6 +30,9 @@ natl_sector_ids <- tribble(
                            "CEU9091000001", "Federal Government",
                         )
 
+# so sometimes they dont put transportation and warehousing together! 
+# so we get trade,transportation and utitilies ; wholesale, retail ; no warehousing ;
+# this comes from here: https://www.bls.gov/sae/additional-resources/naics-supersectors-for-ces-program.htm
 sectors <- tribble(
                    ~code, ~title,
                    "00", "Total Nonfarm",
@@ -103,6 +106,8 @@ merged_annual_natl_results <-
     read_parquet('data/national_sector_employment.parquet')
 
 
+#msa_id <- "32820"  # memphis
+#code <- "30"
 fetch_city_dat <- function(msa_id) {
 
     results <- NULL
@@ -124,6 +129,178 @@ fetch_city_dat <- function(msa_id) {
 
     results
 }
+
+fredr_series_search_text("Boston", tag_names="sae;msa;bls;annual;employment") 
+fredr::fredr_series_tags(series_id="SMU25144603000000001")
+
+cityname <- "Boston"
+fetch_city_dat_generic <- function(cityname) {
+
+    search_results <- fredr_series_search_text(cityname, tag_names="sae;msa;bls;annual;employment") 
+
+    if(nrow(search_results) == 0) {
+        print(paste("No search results for city", cityname))
+        return(NULL)
+    }
+
+    search_results <- search_results |>
+        filter(units == "Thousands of Persons") |>
+        # remove anything that has a more than one colon 
+        filter(str_count(title, ":") <= 1) |> 
+        # make sure it starts with All Employees:
+        filter(str_starts(title, "All Employees:"))  |>
+        # make sure DISCONTINUIED is not in the title
+        filter(!grepl("DISCONTINUED", title, ignore.case=TRUE)) 
+
+    # create a map of sector to series id 
+    # based on text matches
+    results <- NULL 
+    for(i in 1:nrow(sectors)) {
+        sector <- sectors[i, ]
+        sector_title <- sector$title
+
+        # remove commas and 'and', replace with * so that the regex works
+        sector_title_fuzzy <- sector_title |>
+            str_replace_all(",", " ") |>
+            str_replace_all(" and ", " ") |>
+            str_squish() |>
+            str_replace_all(" ", ".*")
+
+        matched_series <- search_results |>
+            filter(grepl(sector_title_fuzzy, title, ignore.case=TRUE))
+
+        if(nrow(matched_series) == 0) {
+            print(paste("No match for sector", sector_title, 'in city', cityname))
+            # print(search_results$title) 
+            # print(sector_title_fuzzy)
+
+            next
+        } else if(nrow(matched_series) > 1) {
+
+            # so the actual sector name is between All Employees: and in 
+            # so lets that first 
+            if(sector_title == "Government") {
+                matched_series <- matched_series |>
+                    mutate(
+                        mini_title = str_remove_all(title, "All Employees:"),
+                        mini_title = str_remove_all(mini_title, "in .*"),
+                        mini_title  = str_squish(mini_title)
+                    ) |> 
+                    filter(mini_title == sector_title)
+            }
+            else {
+                print(paste("Multiple matches for sector", sector_title, "taking first"))
+                print(matched_series$title)
+            }
+        }
+
+        series_id <- matched_series$id[1]
+        print(series_id)
+
+        res <- fredr::fredr_series_observations(series_id = series_id, observation_start = as.Date("1990-01-01"))
+
+        results <- rbind(results, res |> 
+                         mutate(
+                                sector = sector_title,
+                                full_sector_title = matched_series$title[1]
+
+                        ))
+    }
+
+    results
+
+}
+
+chicaggo_dat <- fetch_city_dat_generic("Chicago")
+la_dat <- fetch_city_dat_generic("Los Angeles")
+
+memphis_dat_test2 <- fetch_city_dat_generic("Memphis")
+nyc_dat_test2 <- fetch_city_dat_generic("New York City")
+san_antonio_dat_test2 <- fetch_city_dat_generic("San Antonio")
+
+boston_dat <- fetch_city_dat_generic("Boston")
+
+
+msa_names
+# can we do it for all MSAs.. 
+
+msa_names <- mega_dataset |>
+    select(GeoFIPS, GeoName) |>
+    unique() |>
+    mutate(
+        short_name = str_remove_all(GeoName, "\\(Metropolitan Statistical Area\\)"),
+    )
+
+msa_names
+
+all_msa_data <- NULL
+
+for(i in 1:nrow(msa_names)) {
+    msa <- msa_names[i, ]
+    print(msa)
+    cityname <- msa$short_name
+    msa_id <- msa$GeoFIPS
+    res <- fetch_city_dat_generic(cityname) 
+
+    if(is.null(res)) {
+        next
+    }
+
+    res <- res |>
+        mutate(
+               city = cityname, 
+               msa_id = msa_id
+        )
+
+    all_msa_data <- rbind(all_msa_data, res)
+    # pause for a second to avoid hitting rate limits
+    Sys.sleep(10)
+}
+
+all_msa_data |>
+    write_parquet('data/all_msa_sector_employment_v1.parquet')
+
+# resume loop
+next_range <- i:nrow(msa_names)
+msa_names[i, ]
+
+for(i in next_range) {
+    msa <- msa_names[i, ]
+    print(msa)
+    cityname <- msa$short_name
+    msa_id <- msa$GeoFIPS
+    res <- fetch_city_dat_generic(cityname) 
+
+    if(is.null(res)) {
+        next
+    }
+
+    res <- res |>
+        mutate(
+               city = cityname, 
+               msa_id = msa_id
+        )
+
+
+    all_msa_data <- rbind(all_msa_data, res)
+    # pause for a second to avoid hitting rate limits
+    Sys.sleep(10)
+}
+
+# tag = sae, group_id = rls
+# groupd = geot, name = msa
+# src = bls
+fredr::fredr_series_tags(series_id=series_id)
+
+fredr_tags_series("sae;msa;bls;annual")
+
+fredr_series_search_text("New York City", tag_names="sae;msa;bls;annual;employment") |>
+    select(id, title, units) |>
+    filter(units == "Thousands of Persons") |>
+    distinct()
+
+fredr_tags_series("sae;msa;bls;annual")
+
 
 memphis_msa <- "32820"
 
@@ -195,7 +372,8 @@ fetch_city_dat2 <- function(msa_id) {
 
 san_antonio_dat_test <- fetch_city_dat2(san_antonio_msa)
 
-san_antonio_dat_test
+san_antonio_dat_test |>
+    filter(grepl("Mining", sector))
 
 san_antonio_merged <- san_antonio_dat_test |>
     mutate(year = year(date)) |>
@@ -233,3 +411,47 @@ ggsave('imgs/san-antonio-labor-market-share.png', width=9, height=6)
 
 # new york is a totally different system for some reason
 # they have a code like NEWY636FIREN
+
+
+# ok so lets build a 2 sector database of all the MSAs using this fredr stuff
+# already we know it wont work because nyc is totally different code
+# so we need a new appraoch
+# once we get the dataset we can do the shift share stuff everywhere and put that into a =
+
+
+
+msa_names
+
+merged_annual_natl_results
+
+nyc_merged <- all_msa_data |>
+    filter(msa_id == 35620) |>
+    mutate(year = year(date)) |>
+    left_join(merged_annual_natl_results %>%
+              rename(natl_emps = value), by = c("year", "sector" = "title"))
+
+    library(ggrepel)
+
+nyc_merged |>
+    filter(sector != "Total Nonfarm") |>
+    #filter(!sector %in% c("Retail Trade", "Wholesale Trade")) |>
+    filter(sector != "Trade, Transportation, and Utilities") |>
+    mutate(
+           market_share = value / natl_emps,
+    ) |>
+    filter(sector != "Other Services") |>
+    #filter(year %in% c(1990, 2000, 2010, 2020)) |>
+    filter(year %in% seq(1990, 2020, by=10)) |>
+    arrange(year) |>
+    ggplot(aes(x=value, y=market_share, color=sector, label=str_wrap(sector, 15))) +
+    geom_path(arrow = arrow(length = unit(0.2, "cm"))) +
+    geom_point(data = . %>% filter(year != 2020), pch=21, fill='white') +
+    geom_text_repel(data = . %>% filter(year == 2020)) +
+    theme(legend.position = 'none') +
+    scale_y_continuous(labels = scales::percent) +
+    labs(
+         title = "New York Sectoral Employment from 1990 to 2020",
+         y = "Share of National Employment",
+         x = "Employment in New York (Thousands)",
+         caption = "Source: FRED, Bureau of Labor Statistics"
+    )

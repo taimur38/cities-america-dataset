@@ -290,8 +290,6 @@ quadrants_dat <- gdat |>
     ) |> 
     filter(!is.na(quadrant))
 
-names(gdat)
-
 gdat |>
     ggplot(aes(x=net_migrant_rate, y=fuzzy_cagr)) +
     geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
@@ -322,6 +320,73 @@ ggsave('imgs/median-per-quadrant.png', width=10, height=10)
 
 ---
 
+```{r} 
+
+# use the population cagr instead for the scatter and us abline 1
+
+
+scatter_df |>
+    filter(net_migrant_rate < 0.4) |>
+    mutate(
+           GeoName = str_remove(GeoName, "(Metropolitan Statistical Area)"),
+           GeoName = str_extract(GeoName, "^[^,]+"),
+           GeoName = str_extract(GeoName, "^[^-]+"),
+    ) |>
+    ggplot(aes(x=population_cagr, y=fuzzy_cagr, label=short_name)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_pop_cagr, linetype='dashed') +
+    geom_point( alpha = 0.5 ) +
+    geom_point(data = . %>% filter(GeoFIPS %in% top_cities_2020), color='red') +
+    geom_abline(
+                intercept = avg_nom_cagr - avg_pop_cagr, slope=1
+    ) +
+    geom_abline(intercept = avg_nom_cagr + avg_pop_cagr, slope=-1) +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% top_cities_2020)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Population Growth CAGR (2010-2020)",
+         y = "Mean Wage CAGR (2010-2020)",
+         title = "Changes in Nominal Income vs Net Migration Rate",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+
+ggsave('imgs/45-lines-popcagr.png' , width=10, height=10)
+
+```
+
+---
+
+```{r}
+
+scatter_df |>
+    filter(net_migrant_rate < 0.4) |>
+    ggplot(aes(x=net_migrant_cagr, y=fuzzy_cagr, label=short_name)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_cagr, linetype='dashed') +
+    geom_point( alpha = 0.5 ) +
+    geom_point(data = . %>% filter(GeoFIPS %in% top_cities_2020), color='red') +
+    geom_abline(
+                intercept = avg_nom_cagr - avg_net_migrant_cagr, slope=1
+    ) +
+    geom_abline(intercept = avg_nom_cagr + avg_net_migrant_cagr, slope=-1) +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% top_cities_2020)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Net Migration CAGR (2010-2020)",
+         y = "Mean Wage CAGR (2010-2020)",
+         title = "Changes in Nominal Income vs Net Migration Rate",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+
+ggsave('imgs/45-lines-net-migrant-cagr.png' , width=10, height=10)
+
+```
+
+---
+
+
 ```{r}
 
 kishan_one |>
@@ -347,6 +412,36 @@ kishan_one |>
     )
 
 ggsave('imgs/adding-wyoming-casestudies.png', width=10, height=10)
+
+```
+
+---
+
+```{r}
+
+gdat |>
+    ggplot(aes(x=net_migrant_rate, y=fuzzy_cagr)) +
+    geom_hline(yintercept = avg_nom_cagr, linetype='dashed') +
+    geom_vline(xintercept = avg_net_migrant_rate, linetype='dashed') +
+    geom_segment(data = quadrants_dat,  
+                aes(xend = ifelse(quadrant > 2, min_x, max_x), 
+                    yend = endpoint),
+                x = avg_net_migrant_rate,
+                y = avg_nom_cagr,
+    ) +
+    geom_point(alpha = 0.5 ) +
+    geom_point(data = . %>% filter(GeoFIPS %in% case_studies_df$GeoFIPS), color='red') +
+    geom_label_repel(data = . %>% filter(GeoFIPS %in% case_studies_df$GeoFIPS)) +
+    coord_cartesian(ylim = c(-0.025, 0.05)) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+         x = "Net Migration Rate (2010-2020)",
+         y = "Mean Wage CAGR (2010-2020)",
+         title = "Changes in Nominal Income vs Net Migration Rate",
+         caption = "Source: BEA, University of Wisconsin-Madison, 2024"
+    )
+
 
 ```
 
@@ -416,3 +511,70 @@ kishan_one |>
 
 ```
 
+---
+
+Looking at Memphis now 
+
+---
+
+```{r}
+
+names(all_msa_data)
+cityname <- "Memphis"
+
+create_shift_chart <- function(cityname) {
+
+    city_merged <- all_msa_data |>
+        filter(grepl(cityname, city, ignore.case = T)) |>
+        mutate(year = year(date)) |>
+        left_join(merged_annual_natl_results %>%
+                rename(natl_emps = value), by = c("year", "sector" = "title"))
+
+    city_name_full <- city_merged$city[1]
+    #city_name_short <- city_merged$short_name[1]
+
+    city_merged |>
+        filter(sector != "Total Nonfarm") |>
+        #filter(!sector %in% c("Retail Trade", "Wholesale Trade")) |>
+        filter(sector != "Trade, Transportation, and Utilities") |>
+        mutate(
+            market_share = value / natl_emps,
+        ) |>
+        filter(sector != "Other Services") |>
+        filter(year %in% seq(1990, 2020, by=10)) |>
+        arrange(year) |>
+        ggplot(aes(x=value, y=market_share, color=sector, label=str_wrap(sector, 15))) +
+        geom_path(arrow = arrow(length = unit(0.2, "cm"))) +
+        geom_point(data = . %>% filter(year != 2020), pch=21, fill='white') +
+        geom_text_repel(data = . %>% filter(year == 2020)) +
+        theme(legend.position = 'none') +
+        scale_y_continuous(labels = scales::percent) +
+        labs(
+            title = paste(city_name_full, "Sectoral Employment from 1990 to 2020"),
+            y = "Share of National Employment",
+            x = paste("Employment in", city_name_full, "(Thousands"),
+            caption = "Source: FRED, Bureau of Labor Statistics"
+        )
+
+}
+
+create_shift_chart("San Jose")
+create_shift_chart("San Francisco")
+create_shift_chart("Los Angeles")
+create_shift_chart("Phoenix")
+create_shift_chart("Chicago")
+
+create_shift_chart("Raleigh")
+
+create_shift_chart("New York")
+ggsave('imgs/new-york-sectoral-employment.png', width=10, height=6)
+
+gen_city_patches("Chicago")
+gen_city_patches("New York")
+# now look into zillow for nyc
+
+city_merged |>
+    select(sector, full_sector_title) |> unique()
+
+
+```
